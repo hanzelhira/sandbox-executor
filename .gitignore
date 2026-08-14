@@ -1,0 +1,34 @@
+# --- secrets: never commit these ---
+# The bearer token is supplied via SANDBOX_TOKEN at runtime, never in a file.
+.env
+.env.*
+*.pem
+*.key
+secrets.*
+credentials.*
+
+# --- local notes (kept out of the public repo on purpose) ---
+CLAUDE.md
+
+# --- Go build output ---
+/server
+*.test
+*.out
+coverage.*
+
+# --- frontend (matches at any depth, e.g. web/node_modules) ---
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# --- logs / scratch ---
+*.log
+tmp/
+.scratch/
+
+# --- OS / editor cruft ---
+.DS_Store
+.idea/
+.vscode/
+*.swp

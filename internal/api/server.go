@@ -1,0 +1,278 @@
+package api
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"log"
+	"net/http"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/hanzelhira/sandbox-executor/internal/executor"
+)
+
+const (
+	maxCodeBytes   = 128 << 10 // 128 KiB of source is plenty
+	maxTimeout     = 60 * time.Second
+	defaultTimeout = 10 * time.Second
+	maxMemoryBytes = 1 << 30 // callers can't ask for more than 1 GiB
+)
+
+type Server struct {
+	exec     executor.Executor
+	registry *Registry
+	stats    *Stats
+	token    string
+	upgrader websocket.Upgrader
+}
+
+func NewServer(exec executor.Executor, token string) *Server {
+	return &Server{
+		exec:     exec,
+		registry: NewRegistry(),
+		stats:    &Stats{},
+		token:    token,
+		upgrader: websocket.Upgrader{
+			// Demo service: allow the dev frontend origin. Tighten before deploy.
+			CheckOrigin: func(r *http.Request) bool { return true },
+		},
+	}
+}
+
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /execute", s.auth(s.handleExecute))
+	mux.HandleFunc("POST /execute/sync", s.auth(s.handleExecuteSync))
+	mux.HandleFunc("GET /stream/{id}", s.auth(s.handleStream))
+	mux.HandleFunc("GET /stats", s.auth(s.handleStats))
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	return mux
+}
+
+func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		got := r.Header.Get("Authorization")
+		// Browsers can't set headers on WebSocket dials; accept ?token= there too.
+		if got == "" {
+			got = "Bearer " + r.URL.Query().Get("token")
+		}
+		want := "Bearer " + s.token
+		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+type executeRequest struct {
+	Language string `json:"language"`
+	Code     string `json:"code"`
+	Limits   struct {
+		MemoryBytes int64   `json:"memoryBytes"`
+		CPUQuota    float64 `json:"cpuQuota"`
+		PIDsMax     int64   `json:"pidsMax"`
+	} `json:"limits"`
+	TimeoutMS int64 `json:"timeoutMs"`
+}
+
+func (s *Server) parseRequest(w http.ResponseWriter, r *http.Request) (executor.ExecRequest, bool) {
+	var body executeRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxCodeBytes+4096)).Decode(&body); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return executor.ExecRequest{}, false
+	}
+	if body.Code == "" || len(body.Code) > maxCodeBytes {
+		http.Error(w, "code must be 1..131072 bytes", http.StatusBadRequest)
+		return executor.ExecRequest{}, false
+	}
+	if body.Language == "" {
+		body.Language = "python"
+	}
+
+	limits := executor.DefaultLimits()
+	if body.Limits.MemoryBytes > 0 {
+		limits.MemoryBytes = min(body.Limits.MemoryBytes, maxMemoryBytes)
+	}
+	if body.Limits.CPUQuota > 0 {
+		limits.CPUQuota = min(body.Limits.CPUQuota, 2.0)
+	}
+	if body.Limits.PIDsMax > 0 {
+		limits.PIDsMax = min(body.Limits.PIDsMax, 256)
+	}
+	timeout := defaultTimeout
+	if body.TimeoutMS > 0 {
+		timeout = min(time.Duration(body.TimeoutMS)*time.Millisecond, maxTimeout)
+	}
+	return executor.ExecRequest{
+		Language: body.Language,
+		Code:     body.Code,
+		Limits:   limits,
+		Timeout:  timeout,
+	}, true
+}
+
+// run drives one execution to completion, publishing into the registry record.
+func (s *Server) run(e *Execution, req executor.ExecRequest) {
+	out := make(chan executor.OutputChunk, 256)
+	published := make(chan struct{})
+	go func() {
+		defer close(published)
+		for c := range out {
+			e.publish(c)
+		}
+	}()
+	// Background context: the execution's lifetime is its own timeout,
+	// not the HTTP request that launched it.
+	res, err := s.exec.Execute(context.Background(), req, out)
+	// Execute closed out, so this drains and returns. Wait for it before
+	// finishing: subscribers treat "done" as "no more output is coming".
+	<-published
+	if err == nil {
+		s.stats.Record(res.StartupMS, res.DurationMS)
+	} else {
+		log.Printf("execution %s failed: %v", e.ID, err)
+	}
+	e.finish(res, err)
+}
+
+func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
+	req, ok := s.parseRequest(w, r)
+	if !ok {
+		return
+	}
+	e := s.registry.New()
+	go s.run(e, req)
+	writeJSON(w, http.StatusAccepted, map[string]string{"executionId": e.ID})
+}
+
+func (s *Server) handleExecuteSync(w http.ResponseWriter, r *http.Request) {
+	req, ok := s.parseRequest(w, r)
+	if !ok {
+		return
+	}
+	e := s.registry.New()
+	go s.run(e, req)
+	_, live, done, cancel := e.Subscribe()
+	defer cancel()
+
+	var stdout, stderr []byte
+	for {
+		select {
+		case c := <-live:
+			if c.Stream == "stderr" {
+				stderr = append(stderr, c.Data...)
+			} else {
+				stdout = append(stdout, c.Data...)
+			}
+		case <-done:
+			// Drain anything still buffered in the subscription channel.
+			for {
+				select {
+				case c := <-live:
+					if c.Stream == "stderr" {
+						stderr = append(stderr, c.Data...)
+					} else {
+						stdout = append(stdout, c.Data...)
+					}
+					continue
+				default:
+				}
+				break
+			}
+			res, err := e.Result()
+			if err != nil {
+				http.Error(w, "execution failed: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"executionId": e.ID,
+				"stdout":      string(stdout),
+				"stderr":      string(stderr),
+				"result":      res,
+			})
+			return
+		}
+	}
+}
+
+// Wire frames for /stream: {"type":"chunk",...} then a final {"type":"result",...}.
+type streamFrame struct {
+	Type   string               `json:"type"` // "chunk" | "result" | "error"
+	Stream string               `json:"stream,omitempty"`
+	Data   string               `json:"data,omitempty"`
+	TS     time.Time            `json:"ts,omitempty"`
+	Result *executor.ExecResult `json:"result,omitempty"`
+	Error  string               `json:"error,omitempty"`
+}
+
+func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
+	e, ok := s.registry.Get(r.PathValue("id"))
+	if !ok {
+		http.Error(w, "unknown execution", http.StatusNotFound)
+		return
+	}
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	replay, live, done, cancel := e.Subscribe()
+	defer cancel()
+
+	send := func(f streamFrame) bool {
+		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		return conn.WriteJSON(f) == nil
+	}
+	chunkFrame := func(c executor.OutputChunk) streamFrame {
+		return streamFrame{Type: "chunk", Stream: c.Stream, Data: string(c.Data), TS: c.TS}
+	}
+
+	for _, c := range replay {
+		if !send(chunkFrame(c)) {
+			return
+		}
+	}
+	for {
+		select {
+		case c := <-live:
+			if !send(chunkFrame(c)) {
+				return
+			}
+		case <-done:
+			for {
+				select {
+				case c := <-live:
+					if !send(chunkFrame(c)) {
+						return
+					}
+					continue
+				default:
+				}
+				break
+			}
+			res, err := e.Result()
+			if err != nil {
+				send(streamFrame{Type: "error", Error: err.Error()})
+			} else {
+				send(streamFrame{Type: "result", Result: res})
+			}
+			return
+		}
+	}
+}
+
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.stats.Summary())
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
