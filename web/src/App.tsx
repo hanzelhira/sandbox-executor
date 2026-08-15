@@ -6,18 +6,12 @@ import type { TerminalHandle } from './Terminal'
 import { CodeEditor } from './Editor'
 import { LimitsPanel, DEFAULT_LIMITS, toApiLimits } from './Limits'
 import type { LimitsState } from './Limits'
-
-const DEFAULT_CODE = `import time
-
-for i in range(5):
-    print("tick", i)
-    time.sleep(0.4)
-
-print("done")
-`
+import { PRESETS, limitsForPreset } from './presets'
+import type { Preset } from './presets'
 
 export default function App() {
-  const [code, setCode] = useState(DEFAULT_CODE)
+  const [preset, setPreset] = useState<Preset>(PRESETS[0])
+  const [code, setCode] = useState(PRESETS[0].code)
   const [limits, setLimits] = useState<LimitsState>(DEFAULT_LIMITS)
   const [result, setResult] = useState<ExecResult | null>(null)
   const [running, setRunning] = useState(false)
@@ -27,6 +21,19 @@ export default function App() {
     term.current = h
     h.writeStatus('sandbox ready — press Run', 'ok')
   }, [])
+
+  function selectPreset(id: string) {
+    const p = PRESETS.find((x) => x.id === id)
+    if (!p) return
+    setPreset(p)
+    setCode(p.code)
+    // Presets carry the limits that make their point clearest — a memory bomb
+    // is more legible against 64 MB than 256 MB.
+    setLimits(limitsForPreset(p))
+    setResult(null)
+    term.current?.clear()
+    term.current?.writeStatus(`${p.label} — expect: ${p.expect}`, 'warn')
+  }
 
   async function run() {
     const t = term.current
@@ -84,6 +91,36 @@ export default function App() {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 220px', gap: 16 }}>
         {/* left: editor + terminal */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <label htmlFor="preset" style={{ fontSize: 12, color: 'var(--muted)' }}>
+              Try an attack
+            </label>
+            <select
+              id="preset"
+              value={preset.id}
+              disabled={running}
+              onChange={(e) => selectPreset(e.target.value)}
+              style={{
+                background: 'var(--panel)',
+                color: 'var(--fg)',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                padding: '5px 8px',
+                fontFamily: 'inherit',
+                fontSize: 12,
+              }}
+            >
+              {PRESETS.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+            <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+              stopped by <b style={{ color: 'var(--fg)' }}>{preset.stoppedBy}</b>
+            </span>
+          </div>
+
           <div
             style={{
               height: 280,
