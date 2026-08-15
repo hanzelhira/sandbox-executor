@@ -1,0 +1,7 @@
+# Profiling image only — never used to run untrusted code.
+# It exists so we can observe which syscalls CPython actually makes, and
+# build the seccomp allowlist from evidence instead of guesswork.
+FROM python:3.12-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends strace \
+ && rm -rf /var/lib/apt/lists/*

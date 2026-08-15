@@ -24,14 +24,52 @@ import (
 type DockerExecutor struct {
 	cli   *client.Client
 	image string
+	// seccompProfile is the SecurityOpt value: our allowlist profile, or
+	// "seccomp=unconfined"/Docker's default when comparing.
+	seccompProfile string
+	// SyscallsAllowed is how many syscalls the active profile permits (0 when
+	// using Docker's default, which is a denylist and not counted here).
+	SyscallsAllowed int
 }
 
+// SeccompMode selects which syscall filter a new executor applies.
+type SeccompMode int
+
+const (
+	// SeccompCustom is the default: an allowlist built from observed CPython
+	// behaviour. Everything not on it returns EPERM.
+	SeccompCustom SeccompMode = iota
+	// SeccompDockerDefault uses Docker's built-in denylist. Kept so the two
+	// can be measured against each other.
+	SeccompDockerDefault
+	// SeccompOff disables filtering entirely. Only for demonstrating what the
+	// filter is worth — never for running untrusted code.
+	SeccompOff
+)
+
 func NewDockerExecutor(image string) (*DockerExecutor, error) {
+	return NewDockerExecutorWithSeccomp(image, SeccompCustom)
+}
+
+func NewDockerExecutorWithSeccomp(image string, mode SeccompMode) (*DockerExecutor, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}
-	return &DockerExecutor{cli: cli, image: image}, nil
+	d := &DockerExecutor{cli: cli, image: image}
+	switch mode {
+	case SeccompCustom:
+		profile, n, err := SeccompProfileJSON()
+		if err != nil {
+			return nil, err
+		}
+		d.seccompProfile, d.SyscallsAllowed = "seccomp="+profile, n
+	case SeccompOff:
+		d.seccompProfile = "seccomp=unconfined"
+	case SeccompDockerDefault:
+		d.seccompProfile = "" // omit the option; Docker applies its default
+	}
+	return d, nil
 }
 
 func (d *DockerExecutor) Execute(ctx context.Context, req ExecRequest, out chan<- OutputChunk) (ExecResult, error) {
@@ -60,7 +98,7 @@ func (d *DockerExecutor) Execute(ctx context.Context, req ExecRequest, out chan<
 			ReadonlyRootfs: true,
 			Tmpfs:          map[string]string{"/tmp": "rw,size=64m,noexec"},
 			CapDrop:        []string{"ALL"},
-			SecurityOpt:    []string{"no-new-privileges"},
+			SecurityOpt:    d.securityOpts(),
 			Resources: container.Resources{
 				Memory:     limits.MemoryBytes,
 				MemorySwap: limits.MemoryBytes, // no swap escape hatch
@@ -155,6 +193,14 @@ func (d *DockerExecutor) Execute(ctx context.Context, req ExecRequest, out chan<
 		result.OOMKilled = insp.State.OOMKilled
 	}
 	return result, nil
+}
+
+func (d *DockerExecutor) securityOpts() []string {
+	opts := []string{"no-new-privileges"}
+	if d.seccompProfile != "" {
+		opts = append(opts, d.seccompProfile)
+	}
+	return opts
 }
 
 // killContainer handles a timed-out (or caller-canceled) run: kill the whole
