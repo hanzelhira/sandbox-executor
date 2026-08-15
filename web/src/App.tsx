@@ -3,16 +3,22 @@ import { startExecution, streamExecution } from './api'
 import type { ExecResult } from './api'
 import { TerminalPane } from './Terminal'
 import type { TerminalHandle } from './Terminal'
+import { CodeEditor } from './Editor'
+import { LimitsPanel, DEFAULT_LIMITS, toApiLimits } from './Limits'
+import type { LimitsState } from './Limits'
 
 const DEFAULT_CODE = `import time
+
 for i in range(5):
     print("tick", i)
     time.sleep(0.4)
+
 print("done")
 `
 
 export default function App() {
   const [code, setCode] = useState(DEFAULT_CODE)
+  const [limits, setLimits] = useState<LimitsState>(DEFAULT_LIMITS)
   const [result, setResult] = useState<ExecResult | null>(null)
   const [running, setRunning] = useState(false)
   const term = useRef<TerminalHandle | null>(null)
@@ -28,23 +34,31 @@ export default function App() {
     setResult(null)
     setRunning(true)
     t.clear()
-    const started = performance.now()
     try {
-      const id = await startExecution(code, 15000, {})
+      const id = await startExecution(
+        code,
+        limits.timeoutSec * 1000,
+        toApiLimits(limits),
+      )
       const res = await streamExecution(id, (frame) => {
         if (frame.type === 'chunk' && frame.data !== undefined) {
           t.write(frame.data, frame.stream ?? 'stdout')
         }
       })
       setResult(res)
-      const wall = Math.round(performance.now() - started)
       if (res.timedOut) {
-        t.writeStatus(`[TIMED OUT] killed after ${res.durationMs}ms`, 'err')
+        t.writeStatus(
+          `[TIMED OUT] killed after ${res.durationMs}ms (limit ${limits.timeoutSec}s)`,
+          'err',
+        )
       } else if (res.oomKilled) {
-        t.writeStatus(`[OOM-KILLED] exceeded memory limit`, 'err')
+        t.writeStatus(
+          `[OOM-KILLED] exceeded the ${limits.memoryMB} MB memory limit`,
+          'err',
+        )
       } else {
         t.writeStatus(
-          `[exit ${res.exitCode}] startup ${res.startupMs}ms · run ${res.durationMs}ms · wall ${wall}ms`,
+          `[exit ${res.exitCode}] startup ${res.startupMs}ms · run ${res.durationMs}ms`,
           res.exitCode === 0 ? 'ok' : 'warn',
         )
       }
@@ -56,84 +70,96 @@ export default function App() {
   }
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 12,
-        maxWidth: 860,
-        margin: '2rem auto',
-        padding: '0 1rem',
-        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-        color: '#c9d1d9',
-      }}
-    >
-      <h2 style={{ margin: 0, fontSize: 16 }}>sandbox executor</h2>
+    <div style={{ maxWidth: 1180, margin: '0 auto', padding: '24px 20px 40px' }}>
+      <header style={{ marginBottom: 18 }}>
+        <h1 style={{ margin: 0, fontSize: 17, fontWeight: 600 }}>
+          sandbox executor
+        </h1>
+        <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--muted)' }}>
+          untrusted Python in a network-isolated container with kernel-enforced
+          memory, CPU, process and time limits
+        </p>
+      </header>
 
-      <textarea
-        value={code}
-        onChange={(e) => setCode(e.target.value)}
-        rows={9}
-        spellCheck={false}
-        style={{
-          width: '100%',
-          fontFamily: 'inherit',
-          fontSize: 13,
-          background: '#0b0e14',
-          color: '#c9d1d9',
-          border: '1px solid #21262d',
-          borderRadius: 6,
-          padding: 10,
-          resize: 'vertical',
-        }}
-      />
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 220px', gap: 16 }}>
+        {/* left: editor + terminal */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
+          <div
+            style={{
+              height: 280,
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              overflow: 'hidden',
+              background: 'var(--panel)',
+            }}
+          >
+            <CodeEditor value={code} onChange={setCode} readOnly={running} />
+          </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <button
-          onClick={run}
-          disabled={running}
-          style={{
-            background: running ? '#21262d' : '#238636',
-            color: '#fff',
-            border: 'none',
-            borderRadius: 6,
-            padding: '7px 16px',
-            fontFamily: 'inherit',
-            fontSize: 13,
-            cursor: running ? 'default' : 'pointer',
-          }}
-        >
-          {running ? 'running…' : 'Run'}
-        </button>
-        {result && (
-          <span style={{ fontSize: 12, color: '#8b949e' }}>
-            {/* When the run was killed, the exit code is a sentinel (-1) or a
-                signal artifact (137) — the badge is the real information, so
-                the number is suppressed rather than shown as noise. */}
-            {result.timedOut ? (
-              <b style={{ color: '#f85149' }}>TIMED OUT</b>
-            ) : result.oomKilled ? (
-              <b style={{ color: '#f85149' }}>OOM-KILLED</b>
-            ) : (
-              <span style={{ color: result.exitCode === 0 ? '#3fb950' : '#d29922' }}>
-                exit {result.exitCode}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+            <button
+              onClick={run}
+              disabled={running}
+              style={{
+                background: running ? 'var(--border)' : 'var(--accent)',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 6,
+                padding: '8px 20px',
+                fontFamily: 'inherit',
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: running ? 'default' : 'pointer',
+              }}
+            >
+              {running ? 'running…' : 'Run'}
+            </button>
+
+            {result && (
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                {/* On a kill, the exit code is a sentinel (-1) or a signal
+                    artifact (137) — the badge is the real information. */}
+                {result.timedOut ? (
+                  <b style={{ color: 'var(--danger)' }}>TIMED OUT</b>
+                ) : result.oomKilled ? (
+                  <b style={{ color: 'var(--danger)' }}>OOM-KILLED</b>
+                ) : (
+                  <span
+                    style={{ color: result.exitCode === 0 ? '#3fb950' : '#d29922' }}
+                  >
+                    exit {result.exitCode}
+                  </span>
+                )}
+                {' · '}startup {result.startupMs}ms · run {result.durationMs}ms
               </span>
             )}
-            {' · '}startup {result.startupMs}ms · run {result.durationMs}ms
-          </span>
-        )}
-      </div>
+          </div>
 
-      <div
-        style={{
-          height: 320,
-          background: '#0b0e14',
-          border: '1px solid #21262d',
-          borderRadius: 6,
-          padding: 8,
-        }}
-      >
-        <TerminalPane onReady={onTermReady} />
+          <div
+            style={{
+              height: 300,
+              background: 'var(--panel)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              padding: 8,
+            }}
+          >
+            <TerminalPane onReady={onTermReady} />
+          </div>
+        </div>
+
+        {/* right: limits */}
+        <aside
+          style={{
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+            padding: 14,
+            background: 'var(--panel)',
+            alignSelf: 'start',
+          }}
+        >
+          <LimitsPanel limits={limits} onChange={setLimits} disabled={running} />
+        </aside>
       </div>
     </div>
   )
