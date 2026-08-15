@@ -1,0 +1,33 @@
+/* Minimal reset. The Vite starter's defaults (body{display:flex;place-items:center}
+   and a centered #root) shrink-wrap the app to its content width, which
+   collapses the terminal pane — so they are replaced wholesale. */
+:root {
+  color-scheme: dark;
+  --bg: #010409;
+  --panel: #0b0e14;
+  --border: #21262d;
+  --fg: #c9d1d9;
+  --muted: #8b949e;
+  --accent: #238636;
+  --danger: #f85149;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  min-height: 100vh;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  -webkit-font-smoothing: antialiased;
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -18,7 +19,23 @@ const (
 	maxTimeout     = 60 * time.Second
 	defaultTimeout = 10 * time.Second
 	maxMemoryBytes = 1 << 30 // callers can't ask for more than 1 GiB
+
+	// Admission control. Per-container limits bound what ONE execution can
+	// consume; these bound how many can exist at once, so N concurrent
+	// requests can't multiply 256 MiB x 0.5 CPU into the whole host.
+	DefaultMaxConcurrent = 4  // containers running simultaneously
+	DefaultMaxQueued     = 16 // additionally admitted and waiting for a slot
 )
+
+// Limits is the service-wide capacity policy.
+type Capacity struct {
+	MaxConcurrent int // containers allowed to run at once
+	MaxQueued     int // executions allowed to wait for a slot
+}
+
+func DefaultCapacity() Capacity {
+	return Capacity{MaxConcurrent: DefaultMaxConcurrent, MaxQueued: DefaultMaxQueued}
+}
 
 type Server struct {
 	exec     executor.Executor
@@ -26,9 +43,26 @@ type Server struct {
 	stats    *Stats
 	token    string
 	upgrader websocket.Upgrader
+
+	// slots is a counting semaphore: one token per concurrently running
+	// container. inFlight counts running + queued, so admission can reject
+	// before the queue grows without bound.
+	slots       chan struct{}
+	inFlight    atomic.Int64
+	maxInFlight int64
 }
 
 func NewServer(exec executor.Executor, token string) *Server {
+	return NewServerWithCapacity(exec, token, DefaultCapacity())
+}
+
+func NewServerWithCapacity(exec executor.Executor, token string, cap Capacity) *Server {
+	if cap.MaxConcurrent < 1 {
+		cap.MaxConcurrent = 1
+	}
+	if cap.MaxQueued < 0 {
+		cap.MaxQueued = 0
+	}
 	return &Server{
 		exec:     exec,
 		registry: NewRegistry(),
@@ -38,8 +72,26 @@ func NewServer(exec executor.Executor, token string) *Server {
 			// Demo service: allow the dev frontend origin. Tighten before deploy.
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
+		slots:       make(chan struct{}, cap.MaxConcurrent),
+		maxInFlight: int64(cap.MaxConcurrent + cap.MaxQueued),
 	}
 }
+
+// admit reserves capacity for one execution, or reports that the service is
+// full. Callers that admit successfully MUST call release exactly once.
+func (s *Server) admit() bool {
+	for {
+		cur := s.inFlight.Load()
+		if cur >= s.maxInFlight {
+			return false
+		}
+		if s.inFlight.CompareAndSwap(cur, cur+1) {
+			return true
+		}
+	}
+}
+
+func (s *Server) release() { s.inFlight.Add(-1) }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -117,7 +169,17 @@ func (s *Server) parseRequest(w http.ResponseWriter, r *http.Request) (executor.
 }
 
 // run drives one execution to completion, publishing into the registry record.
+// The caller must have admitted this execution; run releases it.
 func (s *Server) run(e *Execution, req executor.ExecRequest) {
+	defer s.release()
+
+	// Wait for a concurrency slot. Queue wait is measured separately from
+	// execution time so a busy service is distinguishable from a slow one.
+	queuedAt := time.Now()
+	s.slots <- struct{}{}
+	defer func() { <-s.slots }()
+	e.setQueueWait(time.Since(queuedAt))
+
 	out := make(chan executor.OutputChunk, 256)
 	published := make(chan struct{})
 	go func() {
@@ -140,9 +202,21 @@ func (s *Server) run(e *Execution, req executor.ExecRequest) {
 	e.finish(res, err)
 }
 
+// tooBusy rejects when the service is at capacity. 429 + Retry-After is the
+// honest answer: better to refuse fast than to queue without bound and let
+// every request time out.
+func (s *Server) tooBusy(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	http.Error(w, "server at capacity: too many executions in flight", http.StatusTooManyRequests)
+}
+
 func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 	req, ok := s.parseRequest(w, r)
 	if !ok {
+		return
+	}
+	if !s.admit() {
+		s.tooBusy(w)
 		return
 	}
 	e := s.registry.New()
@@ -153,6 +227,10 @@ func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleExecuteSync(w http.ResponseWriter, r *http.Request) {
 	req, ok := s.parseRequest(w, r)
 	if !ok {
+		return
+	}
+	if !s.admit() {
+		s.tooBusy(w)
 		return
 	}
 	e := s.registry.New()
@@ -194,6 +272,7 @@ func (s *Server) handleExecuteSync(w http.ResponseWriter, r *http.Request) {
 				"stdout":      string(stdout),
 				"stderr":      string(stderr),
 				"result":      res,
+				"queueWaitMs": e.QueueWaitMS(),
 			})
 			return
 		}
@@ -202,12 +281,13 @@ func (s *Server) handleExecuteSync(w http.ResponseWriter, r *http.Request) {
 
 // Wire frames for /stream: {"type":"chunk",...} then a final {"type":"result",...}.
 type streamFrame struct {
-	Type   string               `json:"type"` // "chunk" | "result" | "error"
-	Stream string               `json:"stream,omitempty"`
-	Data   string               `json:"data,omitempty"`
-	TS     time.Time            `json:"ts,omitempty"`
-	Result *executor.ExecResult `json:"result,omitempty"`
-	Error  string               `json:"error,omitempty"`
+	Type        string               `json:"type"` // "chunk" | "result" | "error"
+	Stream      string               `json:"stream,omitempty"`
+	Data        string               `json:"data,omitempty"`
+	TS          time.Time            `json:"ts,omitempty"`
+	Result      *executor.ExecResult `json:"result,omitempty"`
+	QueueWaitMS int64                `json:"queueWaitMs,omitempty"`
+	Error       string               `json:"error,omitempty"`
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
@@ -260,7 +340,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				send(streamFrame{Type: "error", Error: err.Error()})
 			} else {
-				send(streamFrame{Type: "result", Result: res})
+				send(streamFrame{Type: "result", Result: res, QueueWaitMS: e.QueueWaitMS()})
 			}
 			return
 		}
@@ -268,7 +348,19 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.stats.Summary())
+	sum := s.stats.Summary()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":        sum.Count,
+		"startupP50Ms": sum.StartupP50,
+		"startupP99Ms": sum.StartupP99,
+		"totalP50Ms":   sum.TotalP50,
+		"totalP99Ms":   sum.TotalP99,
+		// Live capacity, so the UI (and you) can see saturation.
+		"inFlight":      s.inFlight.Load(),
+		"running":       len(s.slots),
+		"maxConcurrent": cap(s.slots),
+		"maxInFlight":   s.maxInFlight,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

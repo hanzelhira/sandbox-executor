@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/hanzelhira/sandbox-executor/internal/api"
 	"github.com/hanzelhira/sandbox-executor/internal/executor"
@@ -23,12 +24,30 @@ func main() {
 		addr = ":8080"
 	}
 
+	capacity := api.DefaultCapacity()
+	if v := envInt("SANDBOX_MAX_CONCURRENT"); v > 0 {
+		capacity.MaxConcurrent = v
+	}
+	if v := envInt("SANDBOX_MAX_QUEUED"); v >= 0 {
+		capacity.MaxQueued = v
+	}
+
 	exec, err := executor.NewDockerExecutor(image)
 	if err != nil {
 		log.Fatalf("docker executor: %v", err)
 	}
-	srv := api.NewServer(exec, token)
+	srv := api.NewServerWithCapacity(exec, token, capacity)
 
-	log.Printf("sandbox-executor listening on %s (image %s)", addr, image)
+	log.Printf("sandbox-executor listening on %s (image %s, max %d concurrent + %d queued)",
+		addr, image, capacity.MaxConcurrent, capacity.MaxQueued)
 	log.Fatal(http.ListenAndServe(addr, srv.Handler()))
+}
+
+// envInt returns the integer value of an env var, or -1 if unset/invalid.
+func envInt(key string) int {
+	v, err := strconv.Atoi(os.Getenv(key))
+	if err != nil {
+		return -1
+	}
+	return v
 }

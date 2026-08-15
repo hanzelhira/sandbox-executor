@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"sync"
+	"time"
 
 	"github.com/hanzelhira/sandbox-executor/internal/executor"
 )
@@ -13,12 +14,28 @@ import (
 type Execution struct {
 	ID string
 
-	mu     sync.Mutex
-	chunks []executor.OutputChunk
-	subs   map[chan executor.OutputChunk]struct{}
-	result *executor.ExecResult
-	err    error
-	done   chan struct{}
+	mu        sync.Mutex
+	chunks    []executor.OutputChunk
+	subs      map[chan executor.OutputChunk]struct{}
+	result    *executor.ExecResult
+	queueWait time.Duration
+	err       error
+	done      chan struct{}
+}
+
+// setQueueWait records how long this execution waited for a concurrency slot.
+// Kept in the control plane: queueing is the server's concern, not the
+// executor's, so executor.ExecResult stays backend-agnostic.
+func (e *Execution) setQueueWait(d time.Duration) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.queueWait = d
+}
+
+func (e *Execution) QueueWaitMS() int64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.queueWait.Milliseconds()
 }
 
 func (e *Execution) publish(c executor.OutputChunk) {
