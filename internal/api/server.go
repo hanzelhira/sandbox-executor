@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"io/fs"
 	"log"
 	"net/http"
 	"sync/atomic"
@@ -94,6 +95,13 @@ func (s *Server) admit() bool {
 func (s *Server) release() { s.inFlight.Add(-1) }
 
 func (s *Server) Handler() http.Handler {
+	return s.HandlerWithUI(nil)
+}
+
+// HandlerWithUI mounts the API and, when assets is non-nil, serves the
+// embedded frontend from "/". API routes are registered as explicit patterns
+// so they always win over the catch-all static route.
+func (s *Server) HandlerWithUI(assets fs.FS) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /execute", s.auth(s.handleExecute))
 	mux.HandleFunc("POST /execute/sync", s.auth(s.handleExecuteSync))
@@ -102,6 +110,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	if assets != nil {
+		mux.Handle("GET /", StaticHandler(assets))
+	}
 	return mux
 }
 

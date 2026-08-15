@@ -18,7 +18,11 @@ coverage.*
 
 # --- frontend (matches at any depth, e.g. web/node_modules) ---
 node_modules/
-dist/
+# Exclude dist *contents*, not the directory itself: git will not descend into
+# an excluded directory, so the .gitkeep could never be re-included. The
+# placeholder keeps //go:embed all:dist compiling on a fresh clone.
+/web/dist/*
+!/web/dist/.gitkeep
 .vite/
 *.tsbuildinfo
 

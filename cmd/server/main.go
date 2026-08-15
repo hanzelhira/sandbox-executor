@@ -8,6 +8,7 @@ import (
 
 	"github.com/hanzelhira/sandbox-executor/internal/api"
 	"github.com/hanzelhira/sandbox-executor/internal/executor"
+	"github.com/hanzelhira/sandbox-executor/web"
 )
 
 func main() {
@@ -38,9 +39,15 @@ func main() {
 	}
 	srv := api.NewServerWithCapacity(exec, token, capacity)
 
+	assets, err := web.Assets()
+	if err != nil {
+		log.Fatalf("embedded frontend: %v", err)
+	}
+
 	log.Printf("sandbox-executor listening on %s (image %s, max %d concurrent + %d queued)",
 		addr, image, capacity.MaxConcurrent, capacity.MaxQueued)
-	log.Fatal(http.ListenAndServe(addr, srv.Handler()))
+	log.Printf("open http://localhost%s", addr)
+	log.Fatal(http.ListenAndServe(addr, srv.HandlerWithUI(assets)))
 }
 
 // envInt returns the integer value of an env var, or -1 if unset/invalid.
