@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { startExecution, streamExecution } from './api'
 import type { ExecResult } from './api'
 import { TerminalPane } from './Terminal'
@@ -8,6 +8,7 @@ import { LimitsPanel, DEFAULT_LIMITS, toApiLimits } from './Limits'
 import type { LimitsState } from './Limits'
 import { PRESETS, limitsForPreset } from './presets'
 import type { Preset } from './presets'
+import { IsolationPanel, StatsBar, SectionLabel } from './Isolation'
 
 export default function App() {
   const [preset, setPreset] = useState<Preset>(PRESETS[0])
@@ -15,11 +16,15 @@ export default function App() {
   const [limits, setLimits] = useState<LimitsState>(DEFAULT_LIMITS)
   const [result, setResult] = useState<ExecResult | null>(null)
   const [running, setRunning] = useState(false)
+  const [runCount, setRunCount] = useState(0)
   const term = useRef<TerminalHandle | null>(null)
+  // Kept in a ref so the keyboard shortcut always calls the current closure
+  // without re-binding the listener on every state change.
+  const runRef = useRef<() => void>(() => {})
 
   const onTermReady = useCallback((h: TerminalHandle) => {
     term.current = h
-    h.writeStatus('sandbox ready — press Run', 'ok')
+    h.writeStatus('sandbox ready — ⌘↵ or Run', 'ok')
   }, [])
 
   function selectPreset(id: string) {
@@ -37,7 +42,7 @@ export default function App() {
 
   async function run() {
     const t = term.current
-    if (!t) return
+    if (!t || running) return
     setResult(null)
     setRunning(true)
     t.clear()
@@ -73,42 +78,52 @@ export default function App() {
       t.writeStatus(`[error] ${e instanceof Error ? e.message : String(e)}`, 'err')
     } finally {
       setRunning(false)
+      setRunCount((n) => n + 1)
     }
   }
+  runRef.current = run
+
+  // ⌘↵ / Ctrl+↵ runs, the way every code playground does.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault()
+        runRef.current()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   return (
-    <div style={{ maxWidth: 1180, margin: '0 auto', padding: '24px 20px 40px' }}>
-      <header style={{ marginBottom: 18 }}>
-        <h1 style={{ margin: 0, fontSize: 17, fontWeight: 600 }}>
-          sandbox executor
-        </h1>
-        <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--muted)' }}>
-          untrusted Python in a network-isolated container with kernel-enforced
-          memory, CPU, process and time limits
-        </p>
+    <div className="app">
+      <header className="app-header">
+        <div>
+          <h1>sandbox executor</h1>
+          <p>
+            untrusted Python in a network-isolated container with kernel-enforced
+            memory, CPU, process and time limits
+          </p>
+        </div>
+        <a
+          className="repo-link"
+          href="https://github.com/hanzelhira/sandbox-executor"
+          target="_blank"
+          rel="noreferrer"
+        >
+          source
+        </a>
       </header>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 220px', gap: 16 }}>
-        {/* left: editor + terminal */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <label htmlFor="preset" style={{ fontSize: 12, color: 'var(--muted)' }}>
-              Try an attack
-            </label>
+      <div className="layout">
+        <main className="main-col">
+          <div className="toolbar">
+            <label htmlFor="preset">Try an attack</label>
             <select
               id="preset"
               value={preset.id}
               disabled={running}
               onChange={(e) => selectPreset(e.target.value)}
-              style={{
-                background: 'var(--panel)',
-                color: 'var(--fg)',
-                border: '1px solid var(--border)',
-                borderRadius: 6,
-                padding: '5px 8px',
-                fontFamily: 'inherit',
-                fontSize: 12,
-              }}
             >
               {PRESETS.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -116,86 +131,59 @@ export default function App() {
                 </option>
               ))}
             </select>
-            <span style={{ fontSize: 11, color: 'var(--muted)' }}>
-              stopped by <b style={{ color: 'var(--fg)' }}>{preset.stoppedBy}</b>
+            <span className="stopped-by">
+              stopped by <b>{preset.stoppedBy}</b>
             </span>
           </div>
 
-          <div
-            style={{
-              height: 280,
-              border: '1px solid var(--border)',
-              borderRadius: 8,
-              overflow: 'hidden',
-              background: 'var(--panel)',
-            }}
-          >
+          <div className="pane editor-pane">
             <CodeEditor value={code} onChange={setCode} readOnly={running} />
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-            <button
-              onClick={run}
-              disabled={running}
-              style={{
-                background: running ? 'var(--border)' : 'var(--accent)',
-                color: '#fff',
-                border: 'none',
-                borderRadius: 6,
-                padding: '8px 20px',
-                fontFamily: 'inherit',
-                fontSize: 13,
-                fontWeight: 600,
-                cursor: running ? 'default' : 'pointer',
-              }}
-            >
+          <div className="run-row">
+            <button className="run-btn" onClick={run} disabled={running}>
               {running ? 'running…' : 'Run'}
+              <kbd>⌘↵</kbd>
             </button>
 
             {result && (
-              <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-                {/* On a kill, the exit code is a sentinel (-1) or a signal
-                    artifact (137) — the badge is the real information. */}
+              <span className="result-strip">
+                {/* On a kill the exit code is a sentinel (-1) or a signal
+                    artifact (137); the badge is the real information. */}
                 {result.timedOut ? (
-                  <b style={{ color: 'var(--danger)' }}>TIMED OUT</b>
+                  <b className="badge danger">TIMED OUT</b>
                 ) : result.oomKilled ? (
-                  <b style={{ color: 'var(--danger)' }}>OOM-KILLED</b>
+                  <b className="badge danger">OOM-KILLED</b>
                 ) : (
-                  <span
-                    style={{ color: result.exitCode === 0 ? '#3fb950' : '#d29922' }}
-                  >
+                  <b className={result.exitCode === 0 ? 'badge ok' : 'badge warn'}>
                     exit {result.exitCode}
-                  </span>
+                  </b>
                 )}
-                {' · '}startup {result.startupMs}ms · run {result.durationMs}ms
+                <span>
+                  startup <b>{result.startupMs}ms</b>
+                </span>
+                <span>
+                  run <b>{result.durationMs}ms</b>
+                </span>
               </span>
             )}
           </div>
 
-          <div
-            style={{
-              height: 300,
-              background: 'var(--panel)',
-              border: '1px solid var(--border)',
-              borderRadius: 8,
-              padding: 8,
-            }}
-          >
+          <div className="pane terminal-pane">
             <TerminalPane onReady={onTermReady} />
           </div>
-        </div>
 
-        {/* right: limits */}
-        <aside
-          style={{
-            border: '1px solid var(--border)',
-            borderRadius: 8,
-            padding: 14,
-            background: 'var(--panel)',
-            alignSelf: 'start',
-          }}
-        >
-          <LimitsPanel limits={limits} onChange={setLimits} disabled={running} />
+          <StatsBar refreshKey={runCount} />
+        </main>
+
+        <aside className="side-col">
+          <section className="pane side-panel">
+            <SectionLabel>Resource limits</SectionLabel>
+            <LimitsPanel limits={limits} onChange={setLimits} disabled={running} />
+          </section>
+          <section className="pane side-panel">
+            <IsolationPanel />
+          </section>
         </aside>
       </div>
     </div>

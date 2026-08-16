@@ -28,6 +28,40 @@ export interface Limits {
 // would issue per-user tokens; static bearer auth is the Week 1 scope.
 const TOKEN = import.meta.env.VITE_SANDBOX_TOKEN ?? 'devtoken'
 
+export interface Control {
+  name: string
+  value: string
+  defends: string
+}
+
+export interface Config {
+  backend: string
+  image: string
+  runtime: string
+  controls: Control[]
+  maxConcurrent: number
+}
+
+export interface Stats {
+  count: number
+  startupP50Ms: number
+  startupP99Ms: number
+  totalP50Ms: number
+  totalP99Ms: number
+  inFlight: number
+  running: number
+  maxConcurrent: number
+}
+
+async function getJSON<T>(path: string): Promise<T> {
+  const resp = await fetch(path, { headers: { Authorization: `Bearer ${TOKEN}` } })
+  if (!resp.ok) throw new Error(`${path}: ${resp.status}`)
+  return (await resp.json()) as T
+}
+
+export const fetchConfig = () => getJSON<Config>('/config')
+export const fetchStats = () => getJSON<Stats>('/stats')
+
 export async function startExecution(
   code: string,
   timeoutMs: number,

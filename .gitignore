@@ -12,6 +12,7 @@ CLAUDE.md
 
 # --- Go build output ---
 /server
+/sandbox-executor
 *.test
 *.out
 coverage.*

@@ -83,18 +83,6 @@ export function LimitsPanel({ limits, onChange, disabled }: Props) {
 
   return (
     <div>
-      <div
-        style={{
-          fontSize: 11,
-          textTransform: 'uppercase',
-          letterSpacing: 0.6,
-          color: 'var(--muted)',
-          marginBottom: 10,
-        }}
-      >
-        Resource limits
-      </div>
-
       <Slider
         label="Memory"
         value={limits.memoryMB}

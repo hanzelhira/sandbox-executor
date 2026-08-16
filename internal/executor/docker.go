@@ -27,6 +27,9 @@ type DockerExecutor struct {
 	// seccompProfile is the SecurityOpt value: our allowlist profile, or
 	// "seccomp=unconfined"/Docker's default when comparing.
 	seccompProfile string
+	// runtime is the OCI runtime name. Empty means Docker's default (runc);
+	// this is the field a gVisor backend would set to "runsc".
+	runtime string
 	// SyscallsAllowed is how many syscalls the active profile permits (0 when
 	// using Docker's default, which is a denylist and not counted here).
 	SyscallsAllowed int

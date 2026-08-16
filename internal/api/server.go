@@ -107,6 +107,7 @@ func (s *Server) HandlerWithUI(assets fs.FS) http.Handler {
 	mux.HandleFunc("POST /execute/sync", s.auth(s.handleExecuteSync))
 	mux.HandleFunc("GET /stream/{id}", s.auth(s.handleStream))
 	mux.HandleFunc("GET /stats", s.auth(s.handleStats))
+	mux.HandleFunc("GET /config", s.auth(s.handleConfig))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -371,6 +372,25 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"running":       len(s.slots),
 		"maxConcurrent": cap(s.slots),
 		"maxInFlight":   s.maxInFlight,
+	})
+}
+
+// handleConfig reports the isolation controls the active backend actually
+// applies, so the UI displays live configuration rather than a hardcoded
+// list that could drift from reality.
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	d, ok := s.exec.(executor.Describer)
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"backend": "unknown"})
+		return
+	}
+	desc := d.Describe()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"backend":       desc.Backend,
+		"image":         desc.Image,
+		"runtime":       desc.Runtime,
+		"controls":      desc.Controls,
+		"maxConcurrent": cap(s.slots),
 	})
 }
 
