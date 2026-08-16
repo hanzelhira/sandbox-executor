@@ -96,6 +96,17 @@ body {
   align-items: start;
 }
 
+/* with a sandbox selected, a file-explorer column is added on the left */
+.layout-repo {
+  grid-template-columns: 190px minmax(0, 1fr) 236px;
+}
+
+.explorer-col {
+  align-self: stretch;
+  padding: 10px;
+  min-height: 300px;
+}
+
 .main-col {
   display: flex;
   flex-direction: column;
@@ -109,11 +120,126 @@ body {
   gap: 12px;
 }
 
-/* Single column before the editor and side panel both get too narrow. */
-@media (max-width: 860px) {
-  .layout {
+/* Single column before the columns get too narrow. */
+@media (max-width: 980px) {
+  .layout,
+  .layout-repo {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* file explorer ------------------------------------------------------ */
+
+.explorer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.explorer-new {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--fg);
+  width: 20px;
+  height: 20px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.explorer-new:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+
+.explorer-new:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.explorer-empty {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.explorer-input {
+  width: 100%;
+  background: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+
+.explorer-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.tree-row:hover {
+  background: var(--panel-2);
+}
+
+.tree-dir {
+  color: var(--muted);
+}
+
+.tree-caret {
+  font-size: 9px;
+  width: 9px;
+  flex: none;
+}
+
+.tree-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-file.active {
+  background: rgba(35, 134, 54, 0.15);
+  color: var(--ok);
+}
+
+.tree-del {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 10px;
+  cursor: pointer;
+  opacity: 0;
+  padding: 0 2px;
+}
+
+.tree-row:hover .tree-del {
+  opacity: 1;
+}
+
+.tree-del:hover {
+  color: var(--danger);
 }
 
 .pane {

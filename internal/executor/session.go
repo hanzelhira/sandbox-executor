@@ -37,6 +37,9 @@ type Session interface {
 	// Populate writes a validated file set into RepoWorkDir. It is additive:
 	// calling it again overlays more files (used for single-file edits).
 	Populate(ctx context.Context, files []RepoFile) error
+	// RemoveFile deletes one repo-relative path from RepoWorkDir. The path is
+	// validated the same way uploads are, so it cannot escape the work dir.
+	RemoveFile(ctx context.Context, path string) error
 	Healthy(ctx context.Context) bool
 	Destroy(ctx context.Context) error
 }
@@ -295,6 +298,27 @@ func (s *dockerSession) execWithInput(ctx context.Context, argv []string, stdin 
 	}
 	if insp.ExitCode != 0 {
 		return fmt.Errorf("unpack failed (exit %d): %s", insp.ExitCode, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// RemoveFile deletes one path from the work dir via `rm -f` (argv, no shell,
+// so the validated path can't be turned into an injection). Validation is the
+// same guard uploads use, so nothing outside RepoWorkDir can be touched.
+func (s *dockerSession) RemoveFile(ctx context.Context, path string) error {
+	clean, err := CleanRepoPath(path)
+	if err != nil {
+		return err
+	}
+	full := RepoWorkDir + "/" + clean
+	ec, err := s.d.cli.ContainerExecCreate(ctx, s.id, container.ExecOptions{
+		Cmd: []string{"rm", "-f", full},
+	})
+	if err != nil {
+		return fmt.Errorf("exec create: %w", err)
+	}
+	if err := s.d.cli.ContainerExecStart(ctx, ec.ID, container.ExecStartOptions{}); err != nil {
+		return fmt.Errorf("exec start: %w", err)
 	}
 	return nil
 }

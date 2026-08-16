@@ -152,6 +152,24 @@ export const readRepoFile = (sessionId: string, path: string) =>
     `/sessions/${sessionId}/files?path=${encodeURIComponent(path)}`,
   ).then((r) => r.content)
 
+// Create or overwrite a single file (empty content creates a blank file).
+export async function writeRepoFile(
+  sessionId: string,
+  path: string,
+  content: string,
+): Promise<void> {
+  const b64 = btoa(unescape(encodeURIComponent(content)))
+  await uploadRepo(sessionId, [{ path, data: b64 }], 'edit')
+}
+
+export async function deleteRepoFile(sessionId: string, path: string): Promise<void> {
+  const resp = await fetch(
+    `/sessions/${sessionId}/files?path=${encodeURIComponent(path)}`,
+    { method: 'DELETE', headers: { Authorization: `Bearer ${TOKEN}` } },
+  )
+  if (!resp.ok && resp.status !== 204) throw new Error(await resp.text())
+}
+
 export async function startExecution(
   code: string,
   timeoutMs: number,

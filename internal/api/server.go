@@ -134,6 +134,7 @@ func (s *Server) HandlerWithUI(assets fs.FS) http.Handler {
 		mux.HandleFunc("POST /sessions/{id}/exec", s.auth(s.handleSessionExec))
 		mux.HandleFunc("POST /sessions/{id}/files", s.auth(s.handleSessionUpload))
 		mux.HandleFunc("GET /sessions/{id}/files", s.auth(s.handleSessionFiles))
+		mux.HandleFunc("DELETE /sessions/{id}/files", s.auth(s.handleSessionDeleteFile))
 		mux.HandleFunc("DELETE /sessions/{id}", s.auth(s.handleSessionDestroy))
 	}
 	if assets != nil {

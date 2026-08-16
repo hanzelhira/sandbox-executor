@@ -64,6 +64,13 @@ func (r *SessionRecord) RepoFile(path string) ([]byte, bool) {
 	return b, ok
 }
 
+// DropRepoFile removes a path from the tracked file map.
+func (r *SessionRecord) DropRepoFile(path string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.repo, path)
+}
+
 func (r *SessionRecord) touch() {
 	r.mu.Lock()
 	r.lastUsed = time.Now()

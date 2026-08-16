@@ -74,6 +74,13 @@ func (s *fakeSession) Populate(ctx context.Context, files []executor.RepoFile) e
 	return nil
 }
 
+func (s *fakeSession) RemoveFile(ctx context.Context, path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.state, "file:"+path)
+	return nil
+}
+
 func (s *fakeSession) Healthy(ctx context.Context) bool { return !s.dead }
 
 func (s *fakeSession) Destroy(ctx context.Context) error {

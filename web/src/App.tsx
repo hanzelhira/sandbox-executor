@@ -4,7 +4,10 @@ import {
   startArgv,
   streamExecution,
   readRepoFile,
-  uploadRepo,
+  writeRepoFile,
+  deleteRepoFile,
+  listRepoFiles,
+  createSession,
 } from './api'
 import type { ExecResult } from './api'
 import { TerminalPane } from './Terminal'
@@ -17,6 +20,7 @@ import type { Preset } from './presets'
 import { IsolationPanel, StatsBar, SectionLabel } from './Isolation'
 import { SessionRail } from './Sessions'
 import { RepoPanel } from './Repo'
+import { FileExplorer } from './FileExplorer'
 
 export default function App() {
   const [preset, setPreset] = useState<Preset>(PRESETS[0])
@@ -29,7 +33,7 @@ export default function App() {
   const [sessionId, setSessionId] = useState<string | null>(null)
   // When a repo file is open, the editor edits that file instead of a snippet.
   const [repoFile, setRepoFile] = useState<string | null>(null)
-  const [hasRepo, setHasRepo] = useState(false)
+  const [repoFiles, setRepoFiles] = useState<string[]>([])
   const term = useRef<TerminalHandle | null>(null)
   // Kept in a ref so the keyboard shortcut always calls the current closure
   // without re-binding the listener on every state change.
@@ -40,8 +44,53 @@ export default function App() {
     h.writeStatus('sandbox ready — ⌘↵ or Run', 'ok')
   }, [])
 
-  // Stable callback so RepoPanel's effect doesn't re-run every render.
-  const markHasRepo = useCallback(() => setHasRepo(true), [])
+  const refreshFiles = useCallback(async (sid: string) => {
+    try {
+      setRepoFiles(await listRepoFiles(sid))
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  // ensureSession returns the current session id, creating a sandbox first if
+  // we're on scratch — so "new file" and upload work without a manual step.
+  async function ensureSession(): Promise<string> {
+    if (sessionId) return sessionId
+    const id = await createSession(toApiLimits(limits))
+    setSessionId(id)
+    return id
+  }
+
+  // Create a blank file (or open it if it already exists) and focus it.
+  async function newFile(path: string) {
+    try {
+      const sid = await ensureSession()
+      const existing = await listRepoFiles(sid)
+      if (!existing.includes(path)) {
+        await writeRepoFile(sid, path, '')
+      }
+      await refreshFiles(sid)
+      setCode('')
+      setRepoFile(path)
+      setResult(null)
+    } catch (e) {
+      term.current?.writeStatus(`[error] new file: ${e}`, 'err')
+    }
+  }
+
+  async function deleteFile(path: string) {
+    if (!sessionId) return
+    try {
+      await deleteRepoFile(sessionId, path)
+      await refreshFiles(sessionId)
+      if (repoFile === path) {
+        setRepoFile(null)
+        setCode('')
+      }
+    } catch (e) {
+      term.current?.writeStatus(`[error] delete: ${e}`, 'err')
+    }
+  }
 
   function selectPreset(id: string) {
     const p = PRESETS.find((x) => x.id === id)
@@ -55,21 +104,33 @@ export default function App() {
     term.current?.writeStatus(`${p.label} — expect: ${p.expect}`, 'warn')
   }
 
-  // Switching sandbox resets which repo/file the editor is bound to.
+  // Switching sandbox resets which repo/file the editor is bound to and loads
+  // that sandbox's file list into the explorer.
   function selectSession(id: string | null) {
     setSessionId(id)
     setRepoFile(null)
-    setHasRepo(false)
+    setResult(null)
     if (id === null) {
+      setRepoFiles([])
       setCode(preset.code)
+    } else {
+      refreshFiles(id)
     }
   }
 
-  // Open a repo file into the editor.
-  async function openFile(path: string) {
-    if (!sessionId) return
+  // After an upload, refresh the tree and open the first file. sid is passed
+  // explicitly because the upload may have just auto-created the session.
+  async function onUploaded(sid: string, firstFile: string | null) {
+    await refreshFiles(sid)
+    if (firstFile) openFile(firstFile, sid)
+  }
+
+  // Open a repo file into the editor. sid is explicit so a just-created session
+  // (not yet reflected in state) still works.
+  async function openFile(path: string, sid = sessionId) {
+    if (!sid) return
     try {
-      const content = await readRepoFile(sessionId, path)
+      const content = await readRepoFile(sid, path)
       setCode(content)
       setRepoFile(path)
       setResult(null)
@@ -118,8 +179,8 @@ export default function App() {
     const timeoutMs = limits.timeoutSec * 1000
     if (sessionId && repoFile) {
       // Push the edited file back, then run it from the repo root.
-      const b64 = btoa(unescape(encodeURIComponent(code)))
-      await uploadRepo(sessionId, [{ path: repoFile, data: b64 }], 'edit')
+      await writeRepoFile(sessionId, repoFile, code)
+      await refreshFiles(sessionId) // a brand-new file now appears in the tree
       await stream(startArgv(sessionId, ['python3', repoFile], timeoutMs))
     } else {
       await stream(startRun(code, timeoutMs, toApiLimits(limits), sessionId))
@@ -165,9 +226,23 @@ export default function App() {
         </a>
       </header>
 
-      <div className="layout">
+      <div className={sessionId ? 'layout layout-repo' : 'layout'}>
+        {sessionId && (
+          <aside className="explorer-col pane">
+            <FileExplorer
+              files={repoFiles}
+              selected={repoFile}
+              onSelect={openFile}
+              onNewFile={newFile}
+              onDelete={deleteFile}
+              disabled={running}
+              hasSession={sessionId !== null}
+            />
+          </aside>
+        )}
+
         <main className="main-col">
-          {hasRepo && sessionId ? (
+          {sessionId ? (
             <div className="toolbar">
               <span className="stopped-by">
                 {repoFile ? (
@@ -175,7 +250,7 @@ export default function App() {
                     editing <b>{repoFile}</b> — Run saves &amp; executes it
                   </>
                 ) : (
-                  <>select a file, or run a command below</>
+                  <>select or create a file, or run a command</>
                 )}
               </span>
               <div className="cmd-bar">
@@ -265,18 +340,10 @@ export default function App() {
               disabled={running}
             />
           </section>
-          {sessionId && (
-            <section className="pane side-panel">
-              <SectionLabel>Repo</SectionLabel>
-              <RepoPanel
-                sessionId={sessionId}
-                selectedFile={repoFile}
-                onSelectFile={openFile}
-                onLoaded={markHasRepo}
-                disabled={running}
-              />
-            </section>
-          )}
+          <section className="pane side-panel">
+            <SectionLabel>Load a repo</SectionLabel>
+            <RepoPanel ensureSession={ensureSession} onLoaded={onUploaded} disabled={running} />
+          </section>
           <section className="pane side-panel">
             <SectionLabel>
               Resource limits{sessionId ? ' (per sandbox — fixed at creation)' : ''}

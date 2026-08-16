@@ -71,6 +71,9 @@ func ValidateRepo(files []RepoFile) ([]RepoFile, error) {
 	return out, nil
 }
 
+// CleanRepoPath is the exported traversal guard, reused by delete/rename paths.
+func CleanRepoPath(p string) (string, error) { return cleanRepoPath(p) }
+
 // cleanRepoPath rejects anything that could escape the work dir and returns the
 // path relative to it. This is the traversal guard.
 func cleanRepoPath(p string) (string, error) {

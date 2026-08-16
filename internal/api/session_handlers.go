@@ -229,6 +229,27 @@ func (s *Server) handleSessionFiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"files": rec.RepoPaths()})
 }
 
+// handleSessionDeleteFile removes one repo file (?path=).
+func (s *Server) handleSessionDeleteFile(w http.ResponseWriter, r *http.Request) {
+	rec, ok := s.sessions.Get(r.PathValue("id"))
+	if !ok {
+		http.Error(w, "no such session", http.StatusNotFound)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		http.Error(w, "missing ?path=", http.StatusBadRequest)
+		return
+	}
+	if err := rec.sess.RemoveFile(r.Context(), path); err != nil {
+		http.Error(w, "delete: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	rec.DropRepoFile(path)
+	rec.touch()
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // clampLimits mirrors parseRequest's clamping for the session-create path.
 func clampLimits(memBytes int64, cpu float64, pids int64) executor.ResourceLimits {
 	limits := executor.DefaultLimits()
