@@ -188,12 +188,6 @@ export default function App() {
   }
   runRef.current = run
 
-  // Run an arbitrary command against the repo (presets: tests, main, etc).
-  async function runCommand(argv: string[]) {
-    if (!sessionId || running) return
-    await stream(startArgv(sessionId, argv, limits.timeoutSec * 1000))
-  }
-
   // ⌘↵ / Ctrl+↵ runs, the way every code playground does.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -250,25 +244,9 @@ export default function App() {
                     editing <b>{repoFile}</b> — Run saves &amp; executes it
                   </>
                 ) : (
-                  <>select or create a file, or run a command</>
+                  <>select or create a file to run it</>
                 )}
               </span>
-              <div className="cmd-bar">
-                <button className="repo-btn" disabled={running} onClick={() => runCommand(['python3', 'main.py'])}>
-                  python main.py
-                </button>
-                <button
-                  className="repo-btn"
-                  disabled={running}
-                  onClick={() => runCommand(['python3', '-m', 'unittest', 'discover', '-v'])}
-                  title="stdlib unittest — pytest and other deps need network (Option A)"
-                >
-                  unittest
-                </button>
-                <button className="repo-btn" disabled={running} onClick={() => runCommand(['ls', '-la'])}>
-                  ls
-                </button>
-              </div>
             </div>
           ) : (
             <div className="toolbar">

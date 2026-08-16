@@ -561,11 +561,6 @@ body {
   word-break: break-word;
 }
 
-.cmd-bar {
-  display: flex;
-  gap: 6px;
-  margin-left: auto;
-}
 
 /* limits sliders ----------------------------------------------------- */
 
