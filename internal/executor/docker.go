@@ -87,29 +87,11 @@ func (d *DockerExecutor) Execute(ctx context.Context, req ExecRequest, out chan<
 	}
 
 	created := time.Now()
+	// -u: unbuffered stdout/stderr so streaming is live, not batched.
+	cmd := []string{"python3", "-u", "-c", req.Code}
 	resp, err := d.cli.ContainerCreate(ctx,
-		&container.Config{
-			Image: d.image,
-			// -u: unbuffered stdout/stderr so streaming is live, not batched.
-			Cmd:             []string{"python3", "-u", "-c", req.Code},
-			User:            "1000:1000",
-			NetworkDisabled: true,
-			WorkingDir:      "/tmp",
-		},
-		&container.HostConfig{
-			NetworkMode:    "none",
-			ReadonlyRootfs: true,
-			Tmpfs:          map[string]string{"/tmp": "rw,size=64m,noexec"},
-			CapDrop:        []string{"ALL"},
-			SecurityOpt:    d.securityOpts(),
-			Resources: container.Resources{
-				Memory:     limits.MemoryBytes,
-				MemorySwap: limits.MemoryBytes, // no swap escape hatch
-				NanoCPUs:   int64(limits.CPUQuota * 1e9),
-				PidsLimit:  &limits.PIDsMax,
-			},
-			AutoRemove: false, // we inspect (OOMKilled) before removing ourselves
-		},
+		d.containerConfig(cmd),
+		d.hostConfig(limits),
 		nil, nil, "")
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("create container: %w", err)
@@ -144,34 +126,10 @@ func (d *DockerExecutor) Execute(ctx context.Context, req ExecRequest, out chan<
 	started := time.Now()
 	startupMS := started.Sub(created).Milliseconds()
 
-	// Demux the attached stream into per-stream chunks on the out channel.
-	// abort lets us unblock the writers if nobody is draining out.
-	abort := make(chan struct{})
-	copyDone := make(chan struct{})
-	go func() {
-		defer close(copyDone)
-		_, _ = stdcopy.StdCopy(
-			chunkWriter{stream: "stdout", out: out, abort: abort},
-			chunkWriter{stream: "stderr", out: out, abort: abort},
-			attach.Reader,
-		)
-	}()
-
-	// The caller closes out once Execute returns, so this goroutine MUST be
+	// The caller closes out once Execute returns, so the pump goroutine MUST be
 	// finished by then — a send on a closed channel is an unrecoverable panic.
-	// Give it a moment to drain naturally (container exit -> EOF -> return),
-	// then force it: closing abort unblocks a stuck writer and closing the
-	// connection makes StdCopy's read fail. Only then wait unconditionally.
-	defer func() {
-		select {
-		case <-copyDone:
-			return
-		case <-time.After(2 * time.Second):
-		}
-		close(abort)
-		attach.Close()
-		<-copyDone
-	}()
+	pump := startStreamPump(attach.Reader, attach.Conn, out)
+	defer pump.finish()
 
 	waitCh, waitErrCh := d.cli.ContainerWait(runCtx, id, container.WaitConditionNotRunning)
 
@@ -204,6 +162,37 @@ func (d *DockerExecutor) securityOpts() []string {
 		opts = append(opts, d.seccompProfile)
 	}
 	return opts
+}
+
+// containerConfig and hostConfig build the identical lockdown used by both
+// one-shot Execute and long-lived sessions — the only difference is the
+// command, so the isolation posture can never silently diverge between them.
+func (d *DockerExecutor) containerConfig(cmd []string) *container.Config {
+	return &container.Config{
+		Image:           d.image,
+		Cmd:             cmd,
+		User:            "1000:1000",
+		NetworkDisabled: true,
+		WorkingDir:      "/tmp",
+	}
+}
+
+func (d *DockerExecutor) hostConfig(limits ResourceLimits) *container.HostConfig {
+	return &container.HostConfig{
+		Runtime:        d.runtime, // "" = runc; a gVisor backend sets "runsc"
+		NetworkMode:    "none",
+		ReadonlyRootfs: true,
+		Tmpfs:          map[string]string{"/tmp": "rw,size=64m,noexec"},
+		CapDrop:        []string{"ALL"},
+		SecurityOpt:    d.securityOpts(),
+		Resources: container.Resources{
+			Memory:     limits.MemoryBytes,
+			MemorySwap: limits.MemoryBytes, // no swap escape hatch
+			NanoCPUs:   int64(limits.CPUQuota * 1e9),
+			PidsLimit:  &limits.PIDsMax,
+		},
+		AutoRemove: false, // we inspect (OOMKilled) before removing ourselves
+	}
 }
 
 // killContainer handles a timed-out (or caller-canceled) run: kill the whole
@@ -241,3 +230,43 @@ func (w chunkWriter) Write(p []byte) (int, error) {
 }
 
 var _ io.Writer = chunkWriter{}
+
+// streamPump demuxes a Docker stdcopy stream into per-stream OutputChunks and
+// guarantees its goroutine has stopped before the caller closes out — the same
+// close-race protection Execute needs, shared with session Exec.
+//
+// Usage: start it, do the run, then call finish() (deferred) before returning.
+// finish waits up to 2s for natural EOF, then forces the reader closed.
+type streamPump struct {
+	abort    chan struct{}
+	copyDone chan struct{}
+	closer   io.Closer
+}
+
+func startStreamPump(reader io.Reader, closer io.Closer, out chan<- OutputChunk) *streamPump {
+	p := &streamPump{
+		abort:    make(chan struct{}),
+		copyDone: make(chan struct{}),
+		closer:   closer,
+	}
+	go func() {
+		defer close(p.copyDone)
+		_, _ = stdcopy.StdCopy(
+			chunkWriter{stream: "stdout", out: out, abort: p.abort},
+			chunkWriter{stream: "stderr", out: out, abort: p.abort},
+			reader,
+		)
+	}()
+	return p
+}
+
+func (p *streamPump) finish() {
+	select {
+	case <-p.copyDone:
+		return
+	case <-time.After(2 * time.Second):
+	}
+	close(p.abort)
+	_ = p.closer.Close()
+	<-p.copyDone
+}

@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
+	"time"
 
 	"github.com/hanzelhira/sandbox-executor/internal/api"
 	"github.com/hanzelhira/sandbox-executor/internal/executor"
@@ -44,10 +48,26 @@ func main() {
 		log.Fatalf("embedded frontend: %v", err)
 	}
 
+	// Destroy any live sandboxes on Ctrl-C / SIGTERM so we never leave
+	// orphaned containers behind.
+	httpSrv := &http.Server{Addr: addr, Handler: srv.HandlerWithUI(assets)}
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		<-sig
+		log.Println("shutting down, destroying live sessions...")
+		srv.Shutdown()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(ctx)
+	}()
+
 	log.Printf("sandbox-executor listening on %s (image %s, max %d concurrent + %d queued)",
 		addr, image, capacity.MaxConcurrent, capacity.MaxQueued)
 	log.Printf("open http://localhost%s", addr)
-	log.Fatal(http.ListenAndServe(addr, srv.HandlerWithUI(assets)))
+	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
 }
 
 // envInt returns the integer value of an env var, or -1 if unset/invalid.

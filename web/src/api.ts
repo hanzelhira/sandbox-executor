@@ -62,6 +62,54 @@ async function getJSON<T>(path: string): Promise<T> {
 export const fetchConfig = () => getJSON<Config>('/config')
 export const fetchStats = () => getJSON<Stats>('/stats')
 
+export interface SessionInfo {
+  id: string
+  createdAt: string
+  idleMs: number
+  runs: number
+  healthy: boolean
+}
+
+export async function createSession(limits: Limits): Promise<string> {
+  const resp = await fetch('/sessions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ limits }),
+  })
+  if (resp.status === 429) throw new Error('session limit reached')
+  if (!resp.ok) throw new Error(`create session: ${resp.status}`)
+  return ((await resp.json()) as { sessionId: string }).sessionId
+}
+
+export const listSessions = () =>
+  getJSON<{ sessions: SessionInfo[]; max: number }>('/sessions')
+
+export async function destroySession(id: string): Promise<void> {
+  await fetch(`/sessions/${id}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${TOKEN}` },
+  })
+}
+
+// Runs code either one-shot (sessionId null) or inside a session.
+export async function startRun(
+  code: string,
+  timeoutMs: number,
+  limits: Limits,
+  sessionId: string | null,
+): Promise<string> {
+  if (sessionId) {
+    const resp = await fetch(`/sessions/${sessionId}/exec`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ code, timeoutMs }),
+    })
+    if (!resp.ok) throw new Error(`exec: ${resp.status} ${await resp.text()}`)
+    return ((await resp.json()) as { executionId: string }).executionId
+  }
+  return startExecution(code, timeoutMs, limits)
+}
+
 export async function startExecution(
   code: string,
   timeoutMs: number,

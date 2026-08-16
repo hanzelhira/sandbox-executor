@@ -250,6 +250,104 @@ body {
   color: var(--danger);
 }
 
+/* session rail ------------------------------------------------------- */
+
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 3px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.session-row:hover {
+  background: var(--panel-2);
+}
+
+.session-row.active {
+  border-color: var(--accent);
+  background: rgba(35, 134, 54, 0.12);
+}
+
+.session-name {
+  flex: 1;
+}
+
+.session-meta {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.session-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  flex: none;
+}
+
+.session-dot[data-healthy='false'] {
+  background: var(--danger);
+}
+
+.session-x {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 2px;
+}
+
+.session-x:hover {
+  color: var(--danger);
+}
+
+.new-session-btn {
+  width: 100%;
+  margin-top: 6px;
+  background: transparent;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.new-session-btn:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--muted);
+}
+
+.new-session-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.session-note {
+  margin: 8px 0 0;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.session-error {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--danger);
+}
+
 /* limits sliders ----------------------------------------------------- */
 
 input[type='range'] {

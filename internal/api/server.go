@@ -51,6 +51,9 @@ type Server struct {
 	slots       chan struct{}
 	inFlight    atomic.Int64
 	maxInFlight int64
+
+	// sessions is nil unless the executor supports long-lived sandboxes.
+	sessions *SessionRegistry
 }
 
 func NewServer(exec executor.Executor, token string) *Server {
@@ -64,7 +67,7 @@ func NewServerWithCapacity(exec executor.Executor, token string, cap Capacity) *
 	if cap.MaxQueued < 0 {
 		cap.MaxQueued = 0
 	}
-	return &Server{
+	s := &Server{
 		exec:     exec,
 		registry: NewRegistry(),
 		stats:    &Stats{},
@@ -75,6 +78,20 @@ func NewServerWithCapacity(exec executor.Executor, token string, cap Capacity) *
 		},
 		slots:       make(chan struct{}, cap.MaxConcurrent),
 		maxInFlight: int64(cap.MaxConcurrent + cap.MaxQueued),
+	}
+	// Enable sessions only if the backend supports them. Cap live sessions at
+	// the same concurrency as runs; reap after 10 minutes idle.
+	if se, ok := exec.(executor.SessionExecutor); ok {
+		s.sessions = NewSessionRegistry(se, cap.MaxConcurrent, 10*time.Minute)
+	}
+	return s
+}
+
+// Shutdown destroys any live sessions so the process leaves no orphaned
+// containers behind.
+func (s *Server) Shutdown() {
+	if s.sessions != nil {
+		s.sessions.Shutdown()
 	}
 }
 
@@ -111,6 +128,12 @@ func (s *Server) HandlerWithUI(assets fs.FS) http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	if s.sessions != nil {
+		mux.HandleFunc("POST /sessions", s.auth(s.handleSessionCreate))
+		mux.HandleFunc("GET /sessions", s.auth(s.handleSessionList))
+		mux.HandleFunc("POST /sessions/{id}/exec", s.auth(s.handleSessionExec))
+		mux.HandleFunc("DELETE /sessions/{id}", s.auth(s.handleSessionDestroy))
+	}
 	if assets != nil {
 		mux.Handle("GET /", StaticHandler(assets))
 	}

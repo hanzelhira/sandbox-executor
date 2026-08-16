@@ -11,6 +11,7 @@ export default defineConfig({
       '/execute': 'http://localhost:8080',
       '/stats': 'http://localhost:8080',
       '/config': 'http://localhost:8080',
+      '/sessions': 'http://localhost:8080',
       '/stream': {
         target: 'ws://localhost:8080',
         ws: true,

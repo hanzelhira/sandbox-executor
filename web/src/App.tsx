@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { startExecution, streamExecution } from './api'
+import { startRun, streamExecution } from './api'
 import type { ExecResult } from './api'
 import { TerminalPane } from './Terminal'
 import type { TerminalHandle } from './Terminal'
@@ -9,6 +9,7 @@ import type { LimitsState } from './Limits'
 import { PRESETS, limitsForPreset } from './presets'
 import type { Preset } from './presets'
 import { IsolationPanel, StatsBar, SectionLabel } from './Isolation'
+import { SessionRail } from './Sessions'
 
 export default function App() {
   const [preset, setPreset] = useState<Preset>(PRESETS[0])
@@ -17,6 +18,8 @@ export default function App() {
   const [result, setResult] = useState<ExecResult | null>(null)
   const [running, setRunning] = useState(false)
   const [runCount, setRunCount] = useState(0)
+  // null = one-shot scratch; a string = run inside that persistent sandbox.
+  const [sessionId, setSessionId] = useState<string | null>(null)
   const term = useRef<TerminalHandle | null>(null)
   // Kept in a ref so the keyboard shortcut always calls the current closure
   // without re-binding the listener on every state change.
@@ -47,10 +50,11 @@ export default function App() {
     setRunning(true)
     t.clear()
     try {
-      const id = await startExecution(
+      const id = await startRun(
         code,
         limits.timeoutSec * 1000,
         toApiLimits(limits),
+        sessionId,
       )
       const res = await streamExecution(id, (frame) => {
         if (frame.type === 'chunk' && frame.data !== undefined) {
@@ -178,8 +182,22 @@ export default function App() {
 
         <aside className="side-col">
           <section className="pane side-panel">
-            <SectionLabel>Resource limits</SectionLabel>
-            <LimitsPanel limits={limits} onChange={setLimits} disabled={running} />
+            <SessionRail
+              selected={sessionId}
+              onSelect={setSessionId}
+              limits={toApiLimits(limits)}
+              disabled={running}
+            />
+          </section>
+          <section className="pane side-panel">
+            <SectionLabel>
+              Resource limits{sessionId ? ' (per sandbox — fixed at creation)' : ''}
+            </SectionLabel>
+            <LimitsPanel
+              limits={limits}
+              onChange={setLimits}
+              disabled={running || sessionId !== null}
+            />
           </section>
           <section className="pane side-panel">
             <IsolationPanel />
