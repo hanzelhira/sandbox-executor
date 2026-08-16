@@ -20,10 +20,10 @@ build: ui
 run: build
 	SANDBOX_TOKEN=$${SANDBOX_TOKEN:-devtoken} ./$(BINARY)
 
-## dev: hot-reloading frontend on :5173 proxied to the API on :8080.
-## Run `go run ./cmd/server` in another shell.
+## dev: run BOTH servers together (API :8080 + hot-reloading UI :5173).
+## Ctrl-C stops both; if either dies the other is torn down too.
 dev:
-	npm --prefix web run dev
+	@./hack/dev.sh
 
 ## test: everything, including integration tests that need a Docker daemon
 test:
