@@ -105,11 +105,18 @@ export default function App() {
   }
 
   // Switching sandbox resets which repo/file the editor is bound to and loads
-  // that sandbox's file list into the explorer.
+  // that sandbox's file list into the explorer. The terminal and result belong
+  // to the previous container, so clear them — otherwise stale output from
+  // another sandbox lingers under the newly selected one.
   function selectSession(id: string | null) {
     setSessionId(id)
     setRepoFile(null)
     setResult(null)
+    term.current?.clear()
+    term.current?.writeStatus(
+      id === null ? 'scratch — one-shot runs' : 'sandbox selected — ⌘↵ or Run',
+      'ok',
+    )
     if (id === null) {
       setRepoFiles([])
       setCode(preset.code)
@@ -169,6 +176,19 @@ export default function App() {
     } finally {
       setRunning(false)
       setRunCount((n) => n + 1)
+    }
+  }
+
+  // Save the open repo file back to the container without running it — useful
+  // for helper modules that aren't meant to be executed directly.
+  async function saveFile() {
+    if (!sessionId || !repoFile || running) return
+    try {
+      await writeRepoFile(sessionId, repoFile, code)
+      await refreshFiles(sessionId) // a brand-new file now appears in the tree
+      term.current?.writeStatus(`saved ${repoFile}`, 'ok')
+    } catch (e) {
+      term.current?.writeStatus(`[error] save: ${e}`, 'err')
     }
   }
 
@@ -278,6 +298,12 @@ export default function App() {
               {running ? 'running…' : repoFile ? 'Save & Run' : 'Run'}
               <kbd>⌘↵</kbd>
             </button>
+
+            {repoFile && (
+              <button className="save-btn" onClick={saveFile} disabled={running}>
+                Save
+              </button>
+            )}
 
             {result && (
               <span className="result-strip">

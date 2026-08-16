@@ -345,6 +345,26 @@ body {
   padding: 1px 4px;
 }
 
+.save-btn {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.save-btn:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+
+.save-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .result-strip {
   display: flex;
   align-items: center;
