@@ -110,6 +110,48 @@ export async function startRun(
   return startExecution(code, timeoutMs, limits)
 }
 
+// Runs an arbitrary argv (e.g. ["python3","main.py"]) in a session's repo dir.
+export async function startArgv(
+  sessionId: string,
+  argv: string[],
+  timeoutMs: number,
+): Promise<string> {
+  const resp = await fetch(`/sessions/${sessionId}/exec`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ argv, timeoutMs }),
+  })
+  if (!resp.ok) throw new Error(`exec: ${resp.status} ${await resp.text()}`)
+  return ((await resp.json()) as { executionId: string }).executionId
+}
+
+export interface UploadFile {
+  path: string
+  data: string // base64
+}
+
+export async function uploadRepo(
+  sessionId: string,
+  files: UploadFile[],
+  label: string,
+): Promise<string[]> {
+  const resp = await fetch(`/sessions/${sessionId}/files`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ label, files }),
+  })
+  if (!resp.ok) throw new Error(await resp.text())
+  return ((await resp.json()) as { files: string[] }).files
+}
+
+export const listRepoFiles = (sessionId: string) =>
+  getJSON<{ files: string[] }>(`/sessions/${sessionId}/files`).then((r) => r.files)
+
+export const readRepoFile = (sessionId: string, path: string) =>
+  getJSON<{ path: string; content: string }>(
+    `/sessions/${sessionId}/files?path=${encodeURIComponent(path)}`,
+  ).then((r) => r.content)
+
 export async function startExecution(
   code: string,
   timeoutMs: number,

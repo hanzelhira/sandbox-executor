@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { startRun, streamExecution } from './api'
+import {
+  startRun,
+  startArgv,
+  streamExecution,
+  readRepoFile,
+  uploadRepo,
+} from './api'
 import type { ExecResult } from './api'
 import { TerminalPane } from './Terminal'
 import type { TerminalHandle } from './Terminal'
@@ -10,6 +16,7 @@ import { PRESETS, limitsForPreset } from './presets'
 import type { Preset } from './presets'
 import { IsolationPanel, StatsBar, SectionLabel } from './Isolation'
 import { SessionRail } from './Sessions'
+import { RepoPanel } from './Repo'
 
 export default function App() {
   const [preset, setPreset] = useState<Preset>(PRESETS[0])
@@ -20,6 +27,9 @@ export default function App() {
   const [runCount, setRunCount] = useState(0)
   // null = one-shot scratch; a string = run inside that persistent sandbox.
   const [sessionId, setSessionId] = useState<string | null>(null)
+  // When a repo file is open, the editor edits that file instead of a snippet.
+  const [repoFile, setRepoFile] = useState<string | null>(null)
+  const [hasRepo, setHasRepo] = useState(false)
   const term = useRef<TerminalHandle | null>(null)
   // Kept in a ref so the keyboard shortcut always calls the current closure
   // without re-binding the listener on every state change.
@@ -30,32 +40,53 @@ export default function App() {
     h.writeStatus('sandbox ready — ⌘↵ or Run', 'ok')
   }, [])
 
+  // Stable callback so RepoPanel's effect doesn't re-run every render.
+  const markHasRepo = useCallback(() => setHasRepo(true), [])
+
   function selectPreset(id: string) {
     const p = PRESETS.find((x) => x.id === id)
     if (!p) return
     setPreset(p)
     setCode(p.code)
-    // Presets carry the limits that make their point clearest — a memory bomb
-    // is more legible against 64 MB than 256 MB.
+    setRepoFile(null) // preset code is a snippet, not a repo file
     setLimits(limitsForPreset(p))
     setResult(null)
     term.current?.clear()
     term.current?.writeStatus(`${p.label} — expect: ${p.expect}`, 'warn')
   }
 
-  async function run() {
+  // Switching sandbox resets which repo/file the editor is bound to.
+  function selectSession(id: string | null) {
+    setSessionId(id)
+    setRepoFile(null)
+    setHasRepo(false)
+    if (id === null) {
+      setCode(preset.code)
+    }
+  }
+
+  // Open a repo file into the editor.
+  async function openFile(path: string) {
+    if (!sessionId) return
+    try {
+      const content = await readRepoFile(sessionId, path)
+      setCode(content)
+      setRepoFile(path)
+      setResult(null)
+    } catch (e) {
+      term.current?.writeStatus(`[error] open ${path}: ${e}`, 'err')
+    }
+  }
+
+  // Stream an execution's output into the terminal and report the outcome.
+  async function stream(startId: Promise<string>) {
     const t = term.current
-    if (!t || running) return
+    if (!t) return
     setResult(null)
     setRunning(true)
     t.clear()
     try {
-      const id = await startRun(
-        code,
-        limits.timeoutSec * 1000,
-        toApiLimits(limits),
-        sessionId,
-      )
+      const id = await startId
       const res = await streamExecution(id, (frame) => {
         if (frame.type === 'chunk' && frame.data !== undefined) {
           t.write(frame.data, frame.stream ?? 'stdout')
@@ -63,15 +94,9 @@ export default function App() {
       })
       setResult(res)
       if (res.timedOut) {
-        t.writeStatus(
-          `[TIMED OUT] killed after ${res.durationMs}ms (limit ${limits.timeoutSec}s)`,
-          'err',
-        )
+        t.writeStatus(`[TIMED OUT] killed after ${res.durationMs}ms`, 'err')
       } else if (res.oomKilled) {
-        t.writeStatus(
-          `[OOM-KILLED] exceeded the ${limits.memoryMB} MB memory limit`,
-          'err',
-        )
+        t.writeStatus(`[OOM-KILLED] exceeded the memory limit`, 'err')
       } else {
         t.writeStatus(
           `[exit ${res.exitCode}] startup ${res.startupMs}ms · run ${res.durationMs}ms`,
@@ -85,7 +110,28 @@ export default function App() {
       setRunCount((n) => n + 1)
     }
   }
+
+  // Run button: if a repo file is open, save it first then run it; otherwise
+  // run the snippet (one-shot or in the session).
+  async function run() {
+    if (running) return
+    const timeoutMs = limits.timeoutSec * 1000
+    if (sessionId && repoFile) {
+      // Push the edited file back, then run it from the repo root.
+      const b64 = btoa(unescape(encodeURIComponent(code)))
+      await uploadRepo(sessionId, [{ path: repoFile, data: b64 }], 'edit')
+      await stream(startArgv(sessionId, ['python3', repoFile], timeoutMs))
+    } else {
+      await stream(startRun(code, timeoutMs, toApiLimits(limits), sessionId))
+    }
+  }
   runRef.current = run
+
+  // Run an arbitrary command against the repo (presets: tests, main, etc).
+  async function runCommand(argv: string[]) {
+    if (!sessionId || running) return
+    await stream(startArgv(sessionId, argv, limits.timeoutSec * 1000))
+  }
 
   // ⌘↵ / Ctrl+↵ runs, the way every code playground does.
   useEffect(() => {
@@ -121,24 +167,54 @@ export default function App() {
 
       <div className="layout">
         <main className="main-col">
-          <div className="toolbar">
-            <label htmlFor="preset">Try an attack</label>
-            <select
-              id="preset"
-              value={preset.id}
-              disabled={running}
-              onChange={(e) => selectPreset(e.target.value)}
-            >
-              {PRESETS.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                </option>
-              ))}
-            </select>
-            <span className="stopped-by">
-              stopped by <b>{preset.stoppedBy}</b>
-            </span>
-          </div>
+          {hasRepo && sessionId ? (
+            <div className="toolbar">
+              <span className="stopped-by">
+                {repoFile ? (
+                  <>
+                    editing <b>{repoFile}</b> — Run saves &amp; executes it
+                  </>
+                ) : (
+                  <>select a file, or run a command below</>
+                )}
+              </span>
+              <div className="cmd-bar">
+                <button className="repo-btn" disabled={running} onClick={() => runCommand(['python3', 'main.py'])}>
+                  python main.py
+                </button>
+                <button
+                  className="repo-btn"
+                  disabled={running}
+                  onClick={() => runCommand(['python3', '-m', 'unittest', 'discover', '-v'])}
+                  title="stdlib unittest — pytest and other deps need network (Option A)"
+                >
+                  unittest
+                </button>
+                <button className="repo-btn" disabled={running} onClick={() => runCommand(['ls', '-la'])}>
+                  ls
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="toolbar">
+              <label htmlFor="preset">Try an attack</label>
+              <select
+                id="preset"
+                value={preset.id}
+                disabled={running}
+                onChange={(e) => selectPreset(e.target.value)}
+              >
+                {PRESETS.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+              <span className="stopped-by">
+                stopped by <b>{preset.stoppedBy}</b>
+              </span>
+            </div>
+          )}
 
           <div className="pane editor-pane">
             <CodeEditor value={code} onChange={setCode} readOnly={running} />
@@ -146,7 +222,7 @@ export default function App() {
 
           <div className="run-row">
             <button className="run-btn" onClick={run} disabled={running}>
-              {running ? 'running…' : 'Run'}
+              {running ? 'running…' : repoFile ? 'Save & Run' : 'Run'}
               <kbd>⌘↵</kbd>
             </button>
 
@@ -184,11 +260,23 @@ export default function App() {
           <section className="pane side-panel">
             <SessionRail
               selected={sessionId}
-              onSelect={setSessionId}
+              onSelect={selectSession}
               limits={toApiLimits(limits)}
               disabled={running}
             />
           </section>
+          {sessionId && (
+            <section className="pane side-panel">
+              <SectionLabel>Repo</SectionLabel>
+              <RepoPanel
+                sessionId={sessionId}
+                selectedFile={repoFile}
+                onSelectFile={openFile}
+                onLoaded={markHasRepo}
+                disabled={running}
+              />
+            </section>
+          )}
           <section className="pane side-panel">
             <SectionLabel>
               Resource limits{sessionId ? ' (per sandbox — fixed at creation)' : ''}
