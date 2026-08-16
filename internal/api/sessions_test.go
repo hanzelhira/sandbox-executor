@@ -61,6 +61,19 @@ func (s *fakeSession) Exec(ctx context.Context, code string, timeout time.Durati
 	return executor.ExecResult{ExitCode: 0, StartupMS: 2, DurationMS: 1}, nil
 }
 
+func (s *fakeSession) ExecArgv(ctx context.Context, argv []string, cwd string, timeout time.Duration, out chan<- executor.OutputChunk) (executor.ExecResult, error) {
+	return s.Exec(ctx, strings.Join(argv, " "), timeout, out)
+}
+
+func (s *fakeSession) Populate(ctx context.Context, files []executor.RepoFile) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, f := range files {
+		s.state["file:"+f.Path] = string(f.Data)
+	}
+	return nil
+}
+
 func (s *fakeSession) Healthy(ctx context.Context) bool { return !s.dead }
 
 func (s *fakeSession) Destroy(ctx context.Context) error {

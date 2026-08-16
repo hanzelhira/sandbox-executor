@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"sort"
 	"sync"
 	"time"
 
@@ -21,6 +22,46 @@ type SessionRecord struct {
 	lastUsed time.Time
 	runs     int
 	busy     bool // an exec is in flight; do not reap
+	// repo holds the file set uploaded to this session, so the UI can render a
+	// tree and open files without exec-ing find/cat. It reflects what was
+	// uploaded/edited, not files the running code generates.
+	repo      map[string][]byte
+	repoLabel string
+}
+
+// SetRepo records the uploaded file set (paths already validated).
+func (r *SessionRecord) SetRepo(files []executor.RepoFile, label string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.repo == nil {
+		r.repo = map[string][]byte{}
+	}
+	for _, f := range files {
+		r.repo[f.Path] = f.Data
+	}
+	if label != "" {
+		r.repoLabel = label
+	}
+}
+
+// RepoPaths returns the sorted file list for the tree.
+func (r *SessionRecord) RepoPaths() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	paths := make([]string, 0, len(r.repo))
+	for p := range r.repo {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// RepoFile returns one file's bytes.
+func (r *SessionRecord) RepoFile(path string) ([]byte, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b, ok := r.repo[path]
+	return b, ok
 }
 
 func (r *SessionRecord) touch() {

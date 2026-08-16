@@ -1,8 +1,11 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +31,12 @@ type SessionSpec struct {
 type Session interface {
 	ID() string
 	Exec(ctx context.Context, code string, timeout time.Duration, out chan<- OutputChunk) (ExecResult, error)
+	// ExecArgv runs an arbitrary argv in a working directory — the repo path.
+	// No shell is involved, so there is no shell injection.
+	ExecArgv(ctx context.Context, argv []string, cwd string, timeout time.Duration, out chan<- OutputChunk) (ExecResult, error)
+	// Populate writes a validated file set into RepoWorkDir. It is additive:
+	// calling it again overlays more files (used for single-file edits).
+	Populate(ctx context.Context, files []RepoFile) error
 	Healthy(ctx context.Context) bool
 	Destroy(ctx context.Context) error
 }
@@ -72,12 +81,21 @@ type dockerSession struct {
 
 func (s *dockerSession) ID() string { return s.id }
 
-// Exec runs code as a new process inside the live container via docker exec.
-// A timeout kills the exec'd process, NOT the container, so one runaway loop
-// does not destroy the session and its accumulated state.
+// Exec runs a single Python snippet — sugar over ExecArgv for the scratch path.
 func (s *dockerSession) Exec(ctx context.Context, code string, timeout time.Duration, out chan<- OutputChunk) (ExecResult, error) {
+	return s.ExecArgv(ctx, []string{"python3", "-u", "-c", code}, "/tmp", timeout, out)
+}
+
+// ExecArgv runs an arbitrary argv as a new process inside the live container.
+// A timeout kills the exec'd process, NOT the container, so one runaway run
+// does not destroy the session and its accumulated state. No shell is spawned,
+// so argv is passed straight to execve — shell injection is impossible.
+func (s *dockerSession) ExecArgv(ctx context.Context, argv []string, cwd string, timeout time.Duration, out chan<- OutputChunk) (ExecResult, error) {
 	defer close(out)
 
+	if len(argv) == 0 {
+		return ExecResult{}, fmt.Errorf("empty argv")
+	}
 	s.mu.Lock()
 	if s.dead {
 		s.mu.Unlock()
@@ -86,12 +104,15 @@ func (s *dockerSession) Exec(ctx context.Context, code string, timeout time.Dura
 	s.nRuns++
 	s.mu.Unlock()
 
+	if cwd == "" {
+		cwd = "/tmp"
+	}
 	created := time.Now()
 	execCfg := container.ExecOptions{
-		Cmd:          []string{"python3", "-u", "-c", code},
+		Cmd:          argv,
 		AttachStdout: true,
 		AttachStderr: true,
-		WorkingDir:   "/tmp",
+		WorkingDir:   cwd,
 	}
 	ec, err := s.d.cli.ContainerExecCreate(ctx, s.id, execCfg)
 	if err != nil {
@@ -199,6 +220,83 @@ func (s *dockerSession) containerOOMKilled() bool {
 		return false
 	}
 	return insp.State.OOMKilled
+}
+
+// unpackScript reads a tar from stdin and extracts it into RepoWorkDir. Run
+// inside the container via exec, so it writes to the writable tmpfs — Docker's
+// CopyToContainer refuses a read-only-rootfs container even for tmpfs. filter=
+// "data" (Python 3.12) rejects absolute paths, traversal, and special files as
+// defense in depth on top of ValidateRepo.
+const unpackScript = `import sys, os, tarfile
+d = "` + RepoWorkDir + `"
+os.makedirs(d, exist_ok=True)
+with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as tf:
+    tf.extractall(d, filter="data")
+`
+
+// Populate writes a validated file set into RepoWorkDir by piping a tar into an
+// unpacker process inside the container. The tmpfs at /tmp is writable, so this
+// succeeds where CopyToContainer does not. Additive: re-calling overlays files,
+// which is how single-file edits are pushed back.
+func (s *dockerSession) Populate(ctx context.Context, files []RepoFile) error {
+	s.mu.Lock()
+	if s.dead {
+		s.mu.Unlock()
+		return fmt.Errorf("session %s is no longer usable", short(s.id))
+	}
+	s.mu.Unlock()
+
+	tarBuf, err := TarRepo(files)
+	if err != nil {
+		return fmt.Errorf("build repo tar: %w", err)
+	}
+	return s.execWithInput(ctx, []string{"python3", "-c", unpackScript}, tarBuf.Bytes())
+}
+
+// execWithInput runs an argv inside the container, feeds it stdin, and waits
+// for it to exit non-streaming. Used for populate/edit where we need the input
+// side and only care about success. It reads stdout/stderr to drain the pipe.
+func (s *dockerSession) execWithInput(ctx context.Context, argv []string, stdin []byte) error {
+	ec, err := s.d.cli.ContainerExecCreate(ctx, s.id, container.ExecOptions{
+		Cmd:          argv,
+		AttachStdin:  true,
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return fmt.Errorf("exec create: %w", err)
+	}
+	attach, err := s.d.cli.ContainerExecAttach(ctx, ec.ID, container.ExecStartOptions{})
+	if err != nil {
+		return fmt.Errorf("exec attach: %w", err)
+	}
+	defer attach.Close()
+
+	// Drain output in the background so the process never blocks on a full pipe.
+	var stderr bytes.Buffer
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		_, _ = stdcopy.StdCopy(io.Discard, &stderr, attach.Reader)
+	}()
+
+	if _, err := attach.Conn.Write(stdin); err != nil {
+		return fmt.Errorf("write stdin: %w", err)
+	}
+	// Half-close stdin so the reader gets EOF and exits.
+	if cw, ok := attach.Conn.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+	}
+	<-drained
+
+	insp, err := s.d.cli.ContainerExecInspect(ctx, ec.ID)
+	if err != nil {
+		return fmt.Errorf("exec inspect: %w", err)
+	}
+	if insp.ExitCode != 0 {
+		return fmt.Errorf("unpack failed (exit %d): %s", insp.ExitCode, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 func (s *dockerSession) Destroy(ctx context.Context) error {
