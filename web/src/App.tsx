@@ -39,8 +39,74 @@ export default function App() {
   // without re-binding the listener on every state change.
   const runRef = useRef<() => void>(() => {})
 
+  // Live mirrors of the per-sandbox editor state. selectSession snapshots the
+  // OUTGOING sandbox at click time, but React state is async — reading `code`
+  // (which Monaco drives at high frequency) from the render closure can save a
+  // stale value into the wrong sandbox. These refs are always current, so the
+  // snapshot is correct even across rapid switches.
+  const codeRef = useRef('')
+  const repoFileRef = useRef<string | null>(null)
+  const resultRef = useRef<ExecResult | null>(null)
+  const sessionIdRef = useRef<string | null>(null)
+
+  function updateCode(v: string) {
+    codeRef.current = v
+    setCode(v)
+  }
+  function updateRepoFile(v: string | null) {
+    repoFileRef.current = v
+    setRepoFile(v)
+  }
+  function updateResult(v: ExecResult | null) {
+    resultRef.current = v
+    setResult(v)
+  }
+
+  // Per-sandbox view state, so switching sandboxes preserves each one's open
+  // file, editor content, terminal output, and result — the terminal and
+  // editor belong to a container, not to the app. Keyed by session id, or
+  // "scratch" for one-shot. Terminal output is recorded as replayable entries
+  // (xterm has no readable buffer), and rewritten on switch.
+  type TermEntry =
+    | { kind: 'out'; data: string; stream: 'stdout' | 'stderr' }
+    | { kind: 'status'; text: string; tone: 'ok' | 'warn' | 'err' }
+  interface ViewState {
+    openFile: string | null
+    code: string
+    term: TermEntry[]
+    result: ExecResult | null
+  }
+  const views = useRef<Record<string, ViewState>>({})
+  const keyOf = (id: string | null) => id ?? 'scratch'
+
+  // Terminal writes go through these so they also land in the current
+  // sandbox's replay buffer. Keyed off the ref, which is always current.
+  function termOut(data: string, stream: 'stdout' | 'stderr') {
+    term.current?.write(data, stream)
+    views.current[keyOf(sessionIdRef.current)]?.term.push({ kind: 'out', data, stream })
+  }
+  function termStatus(text: string, tone: 'ok' | 'warn' | 'err' = 'ok') {
+    term.current?.writeStatus(text, tone)
+    views.current[keyOf(sessionIdRef.current)]?.term.push({ kind: 'status', text, tone })
+  }
+  function termReset(key: string) {
+    if (!views.current[key]) {
+      views.current[key] = { openFile: null, code: '', term: [], result: null }
+    }
+    views.current[key].term = []
+    term.current?.clear()
+  }
+  function replayTerm(entries: TermEntry[]) {
+    term.current?.clear()
+    for (const e of entries) {
+      if (e.kind === 'out') term.current?.write(e.data, e.stream)
+      else term.current?.writeStatus(e.text, e.tone)
+    }
+  }
+
   const onTermReady = useCallback((h: TerminalHandle) => {
     term.current = h
+    views.current['scratch'] ??= { openFile: null, code: '', term: [], result: null }
     h.writeStatus('sandbox ready — ⌘↵ or Run', 'ok')
   }, [])
 
@@ -57,6 +123,8 @@ export default function App() {
   async function ensureSession(): Promise<string> {
     if (sessionId) return sessionId
     const id = await createSession(toApiLimits(limits))
+    sessionIdRef.current = id
+    views.current[id] ??= { openFile: null, code: '', term: [], result: null }
     setSessionId(id)
     return id
   }
@@ -70,9 +138,9 @@ export default function App() {
         await writeRepoFile(sid, path, '')
       }
       await refreshFiles(sid)
-      setCode('')
-      setRepoFile(path)
-      setResult(null)
+      updateCode('')
+      updateRepoFile(path)
+      updateResult(null)
     } catch (e) {
       term.current?.writeStatus(`[error] new file: ${e}`, 'err')
     }
@@ -84,8 +152,8 @@ export default function App() {
       await deleteRepoFile(sessionId, path)
       await refreshFiles(sessionId)
       if (repoFile === path) {
-        setRepoFile(null)
-        setCode('')
+        updateRepoFile(null)
+        updateCode('')
       }
     } catch (e) {
       term.current?.writeStatus(`[error] delete: ${e}`, 'err')
@@ -96,32 +164,47 @@ export default function App() {
     const p = PRESETS.find((x) => x.id === id)
     if (!p) return
     setPreset(p)
-    setCode(p.code)
-    setRepoFile(null) // preset code is a snippet, not a repo file
+    updateCode(p.code)
+    updateRepoFile(null) // preset code is a snippet, not a repo file
     setLimits(limitsForPreset(p))
-    setResult(null)
-    term.current?.clear()
-    term.current?.writeStatus(`${p.label} — expect: ${p.expect}`, 'warn')
+    updateResult(null)
+    termReset('scratch')
+    termStatus(`${p.label} — expect: ${p.expect}`, 'warn')
   }
 
-  // Switching sandbox resets which repo/file the editor is bound to and loads
-  // that sandbox's file list into the explorer. The terminal and result belong
-  // to the previous container, so clear them — otherwise stale output from
-  // another sandbox lingers under the newly selected one.
+  // Switching sandbox saves the current sandbox's view (open file, editor
+  // content, result — terminal output is already recorded live) and restores
+  // the target's, so each container keeps its own editor and terminal.
   function selectSession(id: string | null) {
+    // Snapshot the OUTGOING sandbox from refs (always current), not from
+    // possibly-stale render state.
+    const curKey = keyOf(sessionIdRef.current)
+    const cur = (views.current[curKey] ??= { openFile: null, code: '', term: [], result: null })
+    cur.openFile = repoFileRef.current
+    cur.code = codeRef.current
+    cur.result = resultRef.current
+
+    const nextKey = keyOf(id)
+    const next = (views.current[nextKey] ??= { openFile: null, code: '', term: [], result: null })
+
+    sessionIdRef.current = id
     setSessionId(id)
-    setRepoFile(null)
-    setResult(null)
-    term.current?.clear()
-    term.current?.writeStatus(
-      id === null ? 'scratch — one-shot runs' : 'sandbox selected — ⌘↵ or Run',
-      'ok',
-    )
+    updateRepoFile(next.openFile)
+    updateResult(next.result)
+    replayTerm(next.term)
+    if (next.term.length === 0) {
+      term.current?.writeStatus(
+        id === null ? 'scratch — one-shot runs' : 'sandbox selected — ⌘↵ or Run',
+        'ok',
+      )
+    }
+
     if (id === null) {
       setRepoFiles([])
-      setCode(preset.code)
+      updateCode(next.openFile ? next.code : preset.code)
     } else {
       refreshFiles(id)
+      updateCode(next.code)
     }
   }
 
@@ -138,41 +221,43 @@ export default function App() {
     if (!sid) return
     try {
       const content = await readRepoFile(sid, path)
-      setCode(content)
-      setRepoFile(path)
-      setResult(null)
+      updateCode(content)
+      updateRepoFile(path)
+      updateResult(null)
     } catch (e) {
       term.current?.writeStatus(`[error] open ${path}: ${e}`, 'err')
     }
   }
 
   // Stream an execution's output into the terminal and report the outcome.
+  // Output is recorded into the active sandbox's buffer so switching away and
+  // back shows this run's results again.
   async function stream(startId: Promise<string>) {
-    const t = term.current
-    if (!t) return
-    setResult(null)
+    if (!term.current) return
+    updateResult(null)
     setRunning(true)
-    t.clear()
+    termReset(keyOf(sessionId)) // a new run clears this sandbox's terminal only
     try {
       const id = await startId
       const res = await streamExecution(id, (frame) => {
         if (frame.type === 'chunk' && frame.data !== undefined) {
-          t.write(frame.data, frame.stream ?? 'stdout')
+          termOut(frame.data, frame.stream ?? 'stdout')
         }
       })
-      setResult(res)
+      updateResult(res)
+      views.current[keyOf(sessionIdRef.current)].result = res
       if (res.timedOut) {
-        t.writeStatus(`[TIMED OUT] killed after ${res.durationMs}ms`, 'err')
+        termStatus(`[TIMED OUT] killed after ${res.durationMs}ms`, 'err')
       } else if (res.oomKilled) {
-        t.writeStatus(`[OOM-KILLED] exceeded the memory limit`, 'err')
+        termStatus(`[OOM-KILLED] exceeded the memory limit`, 'err')
       } else {
-        t.writeStatus(
+        termStatus(
           `[exit ${res.exitCode}] startup ${res.startupMs}ms · run ${res.durationMs}ms`,
           res.exitCode === 0 ? 'ok' : 'warn',
         )
       }
     } catch (e) {
-      t.writeStatus(`[error] ${e instanceof Error ? e.message : String(e)}`, 'err')
+      termStatus(`[error] ${e instanceof Error ? e.message : String(e)}`, 'err')
     } finally {
       setRunning(false)
       setRunCount((n) => n + 1)
@@ -186,9 +271,9 @@ export default function App() {
     try {
       await writeRepoFile(sessionId, repoFile, code)
       await refreshFiles(sessionId) // a brand-new file now appears in the tree
-      term.current?.writeStatus(`saved ${repoFile}`, 'ok')
+      termStatus(`saved ${repoFile}`, 'ok')
     } catch (e) {
-      term.current?.writeStatus(`[error] save: ${e}`, 'err')
+      termStatus(`[error] save: ${e}`, 'err')
     }
   }
 
@@ -290,7 +375,7 @@ export default function App() {
           )}
 
           <div className="pane editor-pane">
-            <CodeEditor value={code} onChange={setCode} readOnly={running} />
+            <CodeEditor value={code} onChange={updateCode} readOnly={running} />
           </div>
 
           <div className="run-row">

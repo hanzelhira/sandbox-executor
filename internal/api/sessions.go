@@ -206,6 +206,15 @@ func (sr *SessionRegistry) List() []SessionInfo {
 	}
 	sr.mu.Unlock()
 
+	// Stable order (creation time, then id) — map iteration is random, so
+	// without this the UI list reshuffles on every poll and rows jump around.
+	sort.Slice(recs, func(i, j int) bool {
+		if recs[i].CreatedAt.Equal(recs[j].CreatedAt) {
+			return recs[i].ID < recs[j].ID
+		}
+		return recs[i].CreatedAt.Before(recs[j].CreatedAt)
+	})
+
 	out := make([]SessionInfo, 0, len(recs))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
